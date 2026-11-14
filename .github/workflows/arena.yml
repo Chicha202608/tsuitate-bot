@@ -523,9 +523,9 @@ jobs:
     steps:
       # **checkout は必ず download より前**。actions/checkout はワークスペースを
       # 掃除するので、後ろに置くと落とした artifact も集計の中間ファイルも消える
-      # （2026-08-24 に arena-var のペア集計がこれで落ちた）
+      # （2026-08-24 に arena-var のペア集計がこれで落ちた）。
+      # ペア集計が無い run でも、定跡のライン別の表（scripts/ci/open_lines_summary.py）に要る
       - uses: actions/checkout@v5
-        if: needs.plan.outputs.pair_with != ''
       - uses: actions/download-artifact@v7
         if: needs.plan.outputs.games_from == ''
         with:
@@ -604,6 +604,12 @@ jobs:
             echo '|---|---|---|---|---|---|---|---|---|---|---|---|'
             jq -r '.[] | "| \(.baseline) | \(.rate_pct | . * 10 | round / 10)% ± \(.ci_pct | . * 10 | round / 10)% | \(.wins)-\(.losses)-\(.draws) | \(.checkmate) | \(.foul_limit) | \(.timeout) | \(.max_plies) | \(.avg_plies | . * 10 | round / 10) | \(.fouls_a_per_game | . * 100 | round / 100) | \(.think_avg_ms_a | round)ms / \(.think_p99_ms_a_max | round)ms | \(.clock_used_pct_a | . * 10 | round / 10)% | \(.clock_min_s_a | . * 10 | round / 10)s |"' combined.json
           } >> "$GITHUB_STEP_SUMMARY"
+          # 定跡のラインごとの勝率（`open:book:<戦略名>` などで包んだ側がある run だけ。無ければ何も出ない）
+          if [ -s all-games.jsonl ]; then
+            python3 scripts/ci/open_lines_summary.py --self-test
+            python3 scripts/ci/open_lines_summary.py all-games.jsonl rl_openings.json > open-lines.md
+            cat open-lines.md >> "$GITHUB_STEP_SUMMARY"
+          fi
           cat "$GITHUB_STEP_SUMMARY"
 
       # --- 局ごとのペア集計（issue #19 の P0）---------------------------------
@@ -647,6 +653,7 @@ jobs:
             combined.json
             all.jsonl
             all-games.jsonl
+            open-lines.md
             arena-var.md
             arena-var.json
 

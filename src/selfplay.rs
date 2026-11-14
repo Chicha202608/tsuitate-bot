@@ -618,7 +618,7 @@ pub fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn player_seed(match_seed: u64, game_no: u32, is_a: bool) -> u64 {
+pub fn player_seed(match_seed: u64, game_no: u32, is_a: bool) -> u64 {
     mix(match_seed ^ mix(u64::from(game_no) * 2 + u64::from(is_a)))
 }
 

@@ -312,28 +312,48 @@ fn training_book() -> &'static ForcedBook {
 /// 用途は「強制なしの方策が苦手な序盤」を探すこと（候補は強制なし、相手だけ固定）と、苦手だった
 /// ラインを固定の相手としてガントレットに混ぜて区切りごとの変化を見ること。ラインは添字で指すので、
 /// `rl_openings.json` にラインを足すときは**末尾に足す**（途中に挟むと過去の記録の名前とずれる）。
-/// 中の戦略名は凍結版などの名前（`rl_policy:release:...` は arena.yml の重みの取得が拾わない）。
-/// 読めない名前・範囲外のラインは None
+/// 中の戦略名は凍結版などの名前か方策ネットの重み（`open:book:rl_policy:release:<タグ>/<ファイル>` は
+/// `scripts/ci/resolve_rl_weights.sh` が中の重みを取ってくる）。読めない名前・範囲外のラインは None
 ///
 /// **`open:book:<戦略名>`**（2026-11-12）は、ラインを固定せずに**局ごとにブックから1本引く**相手
 /// （系統ごとに同じ確率 = 本番bot の `TSUITATE_OPEN_BOOK`・p = 1 と同じ引き方）。「定跡に従う相手」を
-/// 1つの基準として測る用で、ラインは局の seed から決まる（seed なしはエントロピー）
+/// 1つの基準として測る用で、ラインは局の seed から決まる（seed なしはエントロピー）。
+///
+/// **序盤を強制して学習したネットを測るとき**は候補の側にも付ける（`open:book:rl_policy:...`）。そういうネットは
+/// 初期局面から自分で指したことが無く、強制なしの対局は学習していない範囲を測る。どのラインを指したかは
+/// [`opening_line_from_name`] で局の seed から分かり、arena は 1行=1対局の記録に残す（ラインごとの勝率用）
 pub fn fixed_opening_from_name(name: &str, seed: Option<u64>) -> Option<Box<dyn crate::strategy::Strategy + Send>> {
-    let (line, inner) = name.strip_prefix(OPEN_PREFIX)?.split_once(':')?;
-    let plan = if line == "book" {
-        use rand::Rng;
-        let s = seed.unwrap_or_else(|| rand::rng().random());
-        // p = 1・両側が対象のブックなので必ず予定が付く。ラインは先手視点の並びで、後手は点対称に読む
-        let [plan, _] = training_book().plans(mix(s ^ OPENING_SALT), 0, None);
-        plan?
-    } else {
-        training_book().fixed_plan(line.parse().ok()?)?
-    };
+    use rand::Rng;
+    let (plan, inner) = plan_from_name(name, seed.unwrap_or_else(|| rand::rng().random()))?;
     let inner = match seed {
         Some(s) => crate::strategy::make_seeded(inner, s),
         None => crate::strategy::make(inner),
     }?;
     Some(Box::new(ForcedOpening::new(inner, plan)))
+}
+
+/// `open:<ライン>:<戦略名>` / `open:book:<戦略名>` の予定と中の戦略名（`seed` は `book` のラインを引くのに使う）
+fn plan_from_name(name: &str, seed: u64) -> Option<(ForcedPlan, &str)> {
+    let (line, inner) = name.strip_prefix(OPEN_PREFIX)?.split_once(':')?;
+    let plan = if line == "book" {
+        // p = 1・両側が対象のブックなので必ず予定が付く。ラインは先手視点の並びで、後手は点対称に読む
+        let [plan, _] = training_book().plans(mix(seed ^ OPENING_SALT), 0, None);
+        plan?
+    } else {
+        training_book().fixed_plan(line.parse().ok()?)?
+    };
+    Some((plan, inner))
+}
+
+/// `open:` で包んだ戦略が、seed `seed` の局で指すライン（`rl_openings.json` の 0 始まりの添字）。
+/// 包んでいない名前・読めない名前は None。[`fixed_opening_from_name`] に同じ seed を渡したときのラインと同じ
+pub fn opening_line_from_name(name: &str, seed: u64) -> Option<u32> {
+    plan_from_name(name, seed).map(|(plan, _)| plan.line_id)
+}
+
+/// `rl_openings.json` のラインの数（[`opening_line_from_name`] の添字の範囲）
+pub fn training_book_lines() -> usize {
+    training_book().line_lengths().len()
 }
 
 /// **序盤を強制する戦略の包み**（arena の自己対局用。`selfplay` が `ARENA_OPEN_BOOK` のときに使う）。
@@ -709,6 +729,29 @@ mod tests {
         for bad in [format!("open:{}:heuristic", lines.len()), "open:x:heuristic".into(), "open:0:no_such".into(), "open:0".into()] {
             assert!(crate::strategy::make(&bad).is_none(), "{bad} は作れない");
         }
+    }
+
+    #[test]
+    fn 名前から分かるラインは実際に指すラインと同じ() {
+        use crate::referee::Referee;
+        let lines = book_lines("rl_openings.json", include_str!("../../rl_openings.json"));
+        assert_eq!(training_book_lines(), lines.len());
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..120u64 {
+            let id = opening_line_from_name("open:book:heuristic", seed).expect("book は必ずラインを引く") as usize;
+            seen.insert(id);
+            let referee = Referee::new();
+            let view = referee.view(Color::Sente, [0, 0], 0);
+            let mut s = crate::strategy::make_seeded("open:book:heuristic", seed).unwrap();
+            let mv = s.choose(&view, referee.log(Color::Sente), referee.foul_tried(Color::Sente));
+            assert_eq!(mv.as_deref(), Some(quiet_prefix(&lines[id]).unwrap()[0].as_str()), "seed {seed}");
+        }
+        assert!(seen.len() > lines.len() / 2, "120局でラインの半分より多くを引く（{}）", seen.len());
+        assert_eq!(opening_line_from_name("open:3:heuristic", 9), Some(3));
+        // 中の戦略名は見ない（重みのパスでもよい）。包んでいない名前・範囲外は None
+        assert_eq!(opening_line_from_name("open:3:rl_policy:/x/y.bin", 9), Some(3));
+        assert_eq!(opening_line_from_name("heuristic", 9), None);
+        assert_eq!(opening_line_from_name(&format!("open:{}:heuristic", lines.len()), 9), None);
     }
 
     #[test]

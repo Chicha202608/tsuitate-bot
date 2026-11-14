@@ -122,6 +122,29 @@
   有意な改善に届かなかった（docs/c8-direct-synthesis.md 参照）。この
   ギャップは今のところ埋まっていない
 
+### 序盤を強制して学習したネットの測り方（定跡のライン別の勝率、2026-11-15）
+
+自己対局の序盤を 100% 定跡から指させて学習したネット（tsuitate-nn の `--open-p 1`）は、**初期局面から自分で指したことが
+無い**。強制なしの arena は学習していない範囲を測ることになるので、そのネットの側を `open:book:` で包む
+（`src/rl/forced.rs`。局ごとに `rl_openings.json` から 1本引いて指し、駒がぶつかる・王手・自分の反則・ラインの終わりで
+中の戦略に戻る）。包むかどうかは候補か基準かではなく、**そのネットが強制つきで学習したか**で決める。
+
+```
+# 既存のモデルが相手: この系列の側だけ包む（相手は自由に指す）
+gh workflow run arena.yml -f games=3700 -f match_seed=<数>   -f candidate="open:book:rl_policy:release:<タグ>/<ファイル>"   -f baselines="estimator_v14 rl_v30 rl_selfplay_v4 rl_deduce_v5 rl_deduce_v10 rl_mmdhandex_v2"
+# この系列どうし: 両方を包む（ラインは先後それぞれ独立に引く = 学習の自己対局と同じ条件）
+#   -f baselines="open:book:rl_policy:release:<タグ>/<前の版のファイル>"
+```
+
+- **ライン別の表は aggregate ジョブが自動で出す**（`scripts/ci/open_lines_summary.py`。サマリーと artifact
+  `arena-combined` の `open-lines.md`）。arena が 1行=1対局の記録（`arena-games.jsonl`。`match_seed` が要る）に、包んだ側が
+  指したラインの添字を `open_line_a`（候補）/ `open_line_b`（基準）として残す。ラインは局の seed から決まるので、
+  同じ `match_seed` の run どうしは同じラインの組になる
+- ラインは系統ごとに同じ確率で引く（学習の `--open-weight category` と同じ）。1ラインあたりの局数は全体の 2.2〜2.8% なので、
+  **基準1体あたり 3,700局で 1ライン 約80〜100局**（50%付近で ±10pt）。方策ネットどうしは 50局が約30秒
+- 1本のラインだけを見るなら `open:<添字>:<戦略名>`（ラインを固定）
+- `rl_policy:release:...` は包みの中でも `scripts/ci/resolve_rl_weights.sh` が取ってくる
+
 ## checkpoint arena（issue #19、破滅検出器として不合格）
 
 - `cargo run --release --bin checkpoint_arena -- <extract|run|compare|report|arena-var>` —

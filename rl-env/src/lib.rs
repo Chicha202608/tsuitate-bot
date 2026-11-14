@@ -667,12 +667,20 @@ impl VecEnv {
     ///
     /// **報酬の整形・監視専用**（真実の盤面を読む信号を含むので、方策の入力には使わない）。
     /// 学習側は連続する2時点の差に重みを掛けて報酬にする（tsuitate-nn の `rnad/shaping.py`）
-    fn signals<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    ///
+    /// 手番ごとに全局ぶん呼ぶので、局を rayon で分け、GIL も放す（一手詰めや利きの信号が重い。直列・GIL を
+    /// 持ったままだと、768局の `--pipeline` の収集が約3倍遅くなり、重ねている更新も GIL 待ちで遅くなった）。
+    // &mut なのは rayon で局を分けるため（observe と同じ。相手戦略は Send だが Sync ではない）
+    fn signals<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<f32>>> {
         let n = self.games.len();
-        let mut out = vec![0.0f32; n * 2 * NUM_SIGNALS];
-        for (o, g) in out.chunks_mut(2 * NUM_SIGNALS).zip(&self.games) {
-            g.signals_into(o);
-        }
+        let games = &mut self.games;
+        let out = py.detach(|| {
+            let mut out = vec![0.0f32; n * 2 * NUM_SIGNALS];
+            out.par_chunks_mut(2 * NUM_SIGNALS)
+                .zip(games.par_iter_mut())
+                .for_each(|(o, g): (&mut [f32], &mut EnvGame)| g.signals_into(o));
+            out
+        });
         PyArray1::from_vec(py, out).reshape([n, 2, NUM_SIGNALS])
     }
 

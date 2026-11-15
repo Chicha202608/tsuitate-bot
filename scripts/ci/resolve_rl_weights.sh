@@ -14,9 +14,20 @@
 # --self-test: ネットワークを使わない分解規則の検査
 set -euo pipefail
 
+# `open:<ライン>:<戦略名>` / `open:book:<戦略名>`（序盤を定跡から指す包み。src/rl/forced.rs）は、
+# 包みを外して中の戦略名を解決し、包みを付け直す
+wrapper() {
+  # 出力: 包みの接頭辞（`open:book:` など。包んでいなければ空）
+  local name="$1"
+  case "$name" in
+    open:*:*) local rest="${name#open:}"; echo "open:${rest%%:*}:" ;;
+  esac
+}
+
 parse() {
   # 出力: prefix tag asset（分解できなければ何も出さない）
   local name="$1"
+  name="${name#"$(wrapper "$name")"}"
   case "$name" in
     rl_policy:release:* | rl_policy_greedy:release:* | rl_policy_basic:release:*) ;;
     *) return 0 ;;
@@ -46,6 +57,13 @@ if [ "${1:-}" = "--self-test" ]; then
   check 'rl_policy:release:rlw-bc-m2a/policy.bin' 'rl_policy rlw-bc-m2a policy.bin'
   check 'rl_policy_greedy:release:rlw/2026/a.bin' 'rl_policy_greedy rlw/2026 a.bin'
   check 'rl_policy_basic:release:rlw-x/policy.bin' 'rl_policy_basic rlw-x policy.bin'
+  check 'open:book:rl_policy:release:rlw-x/policy.bin' 'rl_policy rlw-x policy.bin'
+  check 'open:12:rl_policy_greedy:release:rlw-x/a.bin' 'rl_policy_greedy rlw-x a.bin'
+  check 'open:book:rl_mmdopen_v15' ''
+  if [ "$(wrapper 'open:book:rl_policy:release:t/a.bin')" != 'open:book:' ] || [ "$(wrapper 'open:12:x')" != 'open:12:' ]     || [ -n "$(wrapper 'rl_policy:release:t/a.bin')" ] || [ -n "$(wrapper 'estimator_v14')" ]; then
+    echo "self-test 失敗: 包みの分解" >&2
+    exit 1
+  fi
   if (parse 'rl_policy:release:policy.bin' 2>/dev/null); then
     echo "self-test 失敗: タグの無い指定を通した" >&2
     exit 1
@@ -72,4 +90,4 @@ if [ ! -s "$dir/$asset" ]; then
   exit 1
 fi
 echo "重み: $name → $dir/$asset（sha256 $(sha256sum "$dir/$asset" | cut -c1-12)）" >&2
-echo "${prefix}:$PWD/$dir/$asset"
+echo "$(wrapper "$name")${prefix}:$PWD/$dir/$asset"

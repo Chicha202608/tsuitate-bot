@@ -662,6 +662,17 @@ fn main() {
                                     "think_ms_b": g.think_ms_b,
                                     "moves_a": g.moves_a,
                                     "moves_b": g.moves_b,
+                                    // `open:` で包んだ側が指した定跡のライン（rl_openings.json の添字。
+                                    // 包んでいない側は null）。ラインごとの勝率
+                                    // （scripts/ci/open_lines_summary.py）用で、ペアの検査には使わない
+                                    "open_line_a": tsuitate_bot::rl::forced::opening_line_from_name(
+                                        &candidate,
+                                        tsuitate_bot::selfplay::player_seed(match_seed_eff, g.game_no, true),
+                                    ),
+                                    "open_line_b": tsuitate_bot::rl::forced::opening_line_from_name(
+                                        opp,
+                                        tsuitate_bot::selfplay::player_seed(match_seed_eff, g.game_no, false),
+                                    ),
                                     // **両側の実効予算**。片側だけだと 700ms と 2000ms の
                                     // 2 run が「同じ条件のペア」として通る
                                     "think_budget_ms_a": budget_of(&candidate, &candidate_config()),

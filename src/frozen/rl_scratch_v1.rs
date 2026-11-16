@@ -4,7 +4,7 @@
 //! 推論の一式（行動の符号化・観測のテンソル化・手書きの推論）は凍結時点の固定コピーで、
 //! 重みは `models/rl_scratch_v1.bin` をバイナリに埋め込む（sha256 `4b963c82015dee85e18fe7aeec1aea71664bd253c169f634b982c9c6f660839a`）。
 //! **序盤の定跡を内蔵する**: 毎局 `models/rl_scratch_v1.openings.json`（凍結時点の `rl_openings.json` の固定コピー、
-//! sha256 `7970c2d1591657b69ba6a4614cd68116a3f15379621c9f9cade6c4b21a2f2659`）から系統ごとに同じ確率で1本引き、接触・王手・自分の反則まで
+//! sha256 `0c84ece8ba03504ee93afe71989bec2b511ab17221ec5f25d7612a084e3b0325`）から系統ごとに同じ確率で1本引き、接触・王手・自分の反則まで
 //! そのラインを指す（`open:book:rl_policy:<重み>` と同じ seed なら同じライン・同じ手）。序盤を 100% 強制して
 //! 学習したネットは初期局面から自分で指したことが無いため。強制の仕組みも固定コピー（`forced`）。
 //! 探索なしで1手 約10ms。思考予算・実行時 env は持たない。
@@ -95,7 +95,7 @@ impl Strategy for RlScratchV1Net {
 /// 埋め込んだ定跡（凍結時点の `rl_openings.json` の固定コピー）
 const OPENINGS: &str = include_str!("../../models/rl_scratch_v1.openings.json");
 /// 埋め込んだ定跡の sha256（凍結時点の値。テストで検査する）
-pub const OPENINGS_SHA256: &str = "7970c2d1591657b69ba6a4614cd68116a3f15379621c9f9cade6c4b21a2f2659";
+pub const OPENINGS_SHA256: &str = "0c84ece8ba03504ee93afe71989bec2b511ab17221ec5f25d7612a084e3b0325";
 
 fn book() -> &'static forced::ForcedBook {
     static BOOK: OnceLock<forced::ForcedBook> = OnceLock::new();
@@ -558,7 +558,6 @@ pub mod forced {
         }
         false
     }
-
 
     // 乱数の混ぜ方（`selfplay::mix` の凍結時点の固定コピー）
     fn mix(mut z: u64) -> u64 {

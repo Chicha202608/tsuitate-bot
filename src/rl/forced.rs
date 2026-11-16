@@ -293,6 +293,13 @@ pub fn wrap_for_game(
     }
 }
 
+/// ブックから **seed で1本引いた予定**（`open:book:<戦略名>` と、定跡を内蔵した凍結版が使う）。
+/// p = 1・両側が対象のブックなら必ず予定が付く。ラインは先手視点の並びで、後手は点対称に読む
+pub fn book_plan(book: &ForcedBook, seed: u64) -> Option<ForcedPlan> {
+    let [plan, _] = book.plans(mix(seed ^ OPENING_SALT), 0, None);
+    plan
+}
+
 /// 定跡を固定した相手の戦略名の接頭辞（`open:<ライン>:<戦略名>`）
 pub const OPEN_PREFIX: &str = "open:";
 
@@ -336,9 +343,7 @@ pub fn fixed_opening_from_name(name: &str, seed: Option<u64>) -> Option<Box<dyn 
 fn plan_from_name(name: &str, seed: u64) -> Option<(ForcedPlan, &str)> {
     let (line, inner) = name.strip_prefix(OPEN_PREFIX)?.split_once(':')?;
     let plan = if line == "book" {
-        // p = 1・両側が対象のブックなので必ず予定が付く。ラインは先手視点の並びで、後手は点対称に読む
-        let [plan, _] = training_book().plans(mix(seed ^ OPENING_SALT), 0, None);
-        plan?
+        book_plan(training_book(), seed)?
     } else {
         training_book().fixed_plan(line.parse().ok()?)?
     };

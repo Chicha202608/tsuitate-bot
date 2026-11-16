@@ -7,6 +7,12 @@
 `--series` は本線以外の系列（スタイル特化モデル。例 `nyugyoku` → `rl_nyugyoku_vN` / `RlNyugyokuVN`）。
 省略すると本線の `rl_vN`。
 
+`--open-book <定跡ファイルの固定コピー>` は **序盤の定跡を内蔵した凍結版**（2026-11-17、rl_scratch_v1 から）。
+序盤を 100% 強制して学習したネットは初期局面から自分で指したことが無いので、凍結版が毎局ブックから1本引いて
+接触までそのラインを指す（`open:book:rl_policy:<重み>` と同じ seed なら同じライン・同じ手）。定跡は
+`models/<名前>.openings.json` に固定コピーを置いて埋め込み、強制の仕組み（`src/rl/forced.rs` のブック・予定・包み）も
+固定コピーで持つ（`rl_openings.json` や `forced.rs` を後から変えても凍結版は動かない）。
+
 凍結版は **推論の一式を固定コピーとして持つ**（estimator の凍結と同じ考え方）:
 - `src/rl/action.rs`（行動の符号化・マスク）・`src/rl/encode.rs`（観測のテンソル化）・
   `src/rl/policy_net.rs`（手書きの推論）をテストを落として部分モジュールへ入れる。
@@ -51,6 +57,135 @@ def indent(src: str) -> str:
     return "".join(("    " + line if line.strip() else line) for line in src.splitlines(True))
 
 
+def drop_items(src: str, heads) -> str:
+    """トップレベルの項目（直前の /// の doc ごと）を落とす。`heads` は項目の最初の行の先頭"""
+    lines = src.split("\n")
+    for head in heads:
+        idx = [i for i, l in enumerate(lines) if l.startswith(head)]
+        if len(idx) != 1:
+            sys.exit(f"forced.rs の項目 {head!r} が {len(idx)} 個ある（1個のはず）")
+        s = e = idx[0]
+        while s > 0 and lines[s - 1].startswith("///"):
+            s -= 1
+        if not lines[e].rstrip().endswith(";"):
+            while lines[e] != "}":
+                e += 1
+        del lines[s:e + 1]
+        if s < len(lines) and lines[s] == "" and s > 0 and lines[s - 1] == "":
+            del lines[s]
+    return "\n".join(lines)
+
+
+def forced_body() -> str:
+    """序盤の強制（`src/rl/forced.rs`）のうち、ブック・予定・包みだけの固定コピー。
+    本番bot の env・`open:` の戦略名・学習用のブック（`rl_openings.json` の埋め込み）は落とす"""
+    src = drop_items(body("src/rl/forced.rs"), [
+        "pub fn bot_book_from_env", "pub fn wrap_for_game", "pub const OPEN_PREFIX", "fn training_book",
+        "pub fn fixed_opening_from_name", "fn plan_from_name", "pub fn opening_line_from_name",
+        "pub fn training_book_lines",
+    ])
+    mix = re.search(r"pub fn mix\(mut z: u64\) -> u64 \{\n.*?\n\}\n", (ROOT / "src/selfplay.rs").read_text(), re.S)
+    if not mix or src.count("use crate::selfplay::mix;\n") != 1:
+        sys.exit("selfplay::mix の固定コピーを作れない")
+    src = src.replace("use crate::selfplay::mix;\n", "")
+    src = src.rstrip("\n") + "\n"
+    src += "\n// 乱数の混ぜ方（`selfplay::mix` の凍結時点の固定コピー）\n" + mix.group(0).replace("pub fn mix", "fn mix")
+    for bad in ("env::var(", "crate::rl::", "crate::selfplay::", "include_str!", "strategy::make"):
+        if bad in src:
+            sys.exit(f"forced の固定コピーに凍結されない依存が残っている（{bad}）")
+    return src
+
+
+def with_opening(out: str, ty: str, strat: str, label: str, open_book: str) -> str:
+    """序盤の定跡を内蔵した形にする: 方策の型を `<型>Net` に下げ、`<型>` はそれを強制の包みで包む"""
+    def rep(a: str, b: str) -> None:
+        nonlocal out
+        if out.count(a) != 1:
+            sys.exit(f"凍結版の雛形に {a!r} が {out.count(a)} 個ある（1個のはず）")
+        out = out.replace(a, b)
+
+    book_sha = hashlib.sha256((ROOT / open_book).read_bytes()).hexdigest()
+    for head in ("pub struct ", "impl ", "impl Default for ", "impl Strategy for "):
+        rep(f"\n{head}{ty} {{", f"\n{head}{ty}Net {{")
+    rep(f"/// {label} の戦略（`strategy::make(\"{strat}\")`）。softmax からサンプリングする\n",
+        f"/// {label} の方策（序盤の強制の中身。softmax からサンプリングする）\n")
+    rep("//! 探索なしで1手 約10ms。",
+        f"//! **序盤の定跡を内蔵する**: 毎局 `{open_book}`（凍結時点の `rl_openings.json` の固定コピー、\n"
+        f"//! sha256 `{book_sha}`）から系統ごとに同じ確率で1本引き、接触・王手・自分の反則まで\n"
+        "//! そのラインを指す（`open:book:rl_policy:<重み>` と同じ seed なら同じライン・同じ手）。序盤を 100% 強制して\n"
+        "//! 学習したネットは初期局面から自分で指したことが無いため。強制の仕組みも固定コピー（`forced`）。\n"
+        "//! 探索なしで1手 約10ms。")
+    wrapper = f"""/// 埋め込んだ定跡（凍結時点の `rl_openings.json` の固定コピー）
+const OPENINGS: &str = include_str!("../../{open_book}");
+/// 埋め込んだ定跡の sha256（凍結時点の値。テストで検査する）
+pub const OPENINGS_SHA256: &str = "{book_sha}";
+
+fn book() -> &'static forced::ForcedBook {{
+    static BOOK: OnceLock<forced::ForcedBook> = OnceLock::new();
+    BOOK.get_or_init(|| {{
+        forced::book_from_json(OPENINGS, 1.0, None, forced::ForcedSides::Both).expect("凍結版の定跡が読めない")
+    }})
+}}
+
+/// {label} の戦略（`strategy::make("{strat}")`）。序盤は内蔵の定跡から1本引いて指し、以後は方策に任せる
+pub struct {ty}(forced::ForcedOpening<{ty}Net>);
+
+impl {ty} {{
+    pub fn new() -> Self {{
+        Self::with_seed(rand::rng().random())
+    }}
+
+    /// ラインも方策の乱数も `seed` から決まる（`open:book:rl_policy:<重み>` に同じ seed を渡したときと同じ）
+    pub fn with_seed(seed: u64) -> Self {{
+        let plan = forced::book_plan(book(), seed).expect("p = 1 のブックは必ず予定が付く");
+        Self(forced::ForcedOpening::new(Box::new({ty}Net::with_seed(seed)), plan))
+    }}
+}}
+
+impl Default for {ty} {{
+    fn default() -> Self {{
+        Self::new()
+    }}
+}}
+
+impl Strategy for {ty} {{
+    fn choose(
+        &mut self,
+        view: &PlayerView,
+        log: &ObservationLog,
+        foul_tried: &HashSet<String>,
+    ) -> Option<String> {{
+        self.0.choose(view, log, foul_tried)
+    }}
+
+    fn name(&self) -> &'static str {{
+        "{strat}"
+    }}
+
+    fn debug_state(&self) -> Option<serde_json::Value> {{
+        self.0.debug_state()
+    }}
+}}
+
+/// 序盤の強制（`src/rl/forced.rs` のブック・予定・包みの凍結時点の固定コピー）
+pub mod forced {{
+{indent(forced_body())}}}
+
+"""
+    anchor = "/// 行動の符号化とマスク（`src/rl/action.rs` の凍結時点の固定コピー）\npub mod action {"
+    rep(anchor, wrapper + anchor)
+    rep("    fn 埋め込んだ重みは凍結時点のもの() {", """    fn 埋め込んだ定跡は凍結時点のもの() {
+        use sha2::{Digest, Sha256};
+        let got: String = Sha256::digest(OPENINGS.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(got, OPENINGS_SHA256);
+        assert!(book().line_lengths().iter().all(|&n| n > 0));
+    }
+
+    #[test]
+    fn 埋め込んだ重みは凍結時点のもの() {""")
+    return out
+
+
 def main() -> None:
     args = sys.argv[1:]
     series = ""
@@ -60,6 +195,11 @@ def main() -> None:
         del args[i:i + 2]
         if not re.fullmatch(r"[a-z][a-z0-9]*", series):
             sys.exit(f"--series は英小文字と数字だけ（{series}）")
+    open_book = ""
+    if "--open-book" in args:
+        i = args.index("--open-book")
+        open_book = args[i + 1]
+        del args[i:i + 2]
     if len(args) != 4:
         sys.exit(__doc__)
     n, date, summary, weights = args
@@ -88,7 +228,7 @@ def main() -> None:
             sys.exit(f"{name} に凍結されない依存が残っている")
 
     rel_weights = "../../" + weights
-    print(f"""//! **{label}**（{date}）: 方策ネット（DeepNash 路線の R-NaD）。{summary}
+    out = f"""//! **{label}**（{date}）: 方策ネット（DeepNash 路線の R-NaD）。{summary}
 //!
 //! `scripts/freeze_rl.py` が生成した。**編集しない**（改善は `src/rl/` で行う）。
 //! 推論の一式（行動の符号化・観測のテンソル化・手書きの推論）は凍結時点の固定コピーで、
@@ -201,7 +341,10 @@ mod tests {{
         assert_eq!(got, WEIGHTS_SHA256);
         assert!(net().forward(&vec![0.0; net().planes() * 81]).0.len() == action::NUM_ACTIONS);
     }}
-}}""")
+}}"""
+    if open_book:
+        out = with_opening(out, ty, strat, label, open_book)
+    print(out)
 
 
 if __name__ == "__main__":

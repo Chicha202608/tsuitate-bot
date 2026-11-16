@@ -85,6 +85,7 @@ pub mod rl_mmdhandv1branch_v1;
 pub mod rl_mmdhandex_v1;
 pub mod rl_mmdhandex_v2;
 pub mod rl_mmdhandexv2branch_v1;
+pub mod rl_scratch_v1;
 pub mod rl_mmdv3branch_v1;
 pub mod rl_guard_v1;
 
@@ -174,6 +175,7 @@ pub const SOURCES: &[(u32, &str, &str)] = &[
     (76, "rl_mmdhandex_v1", include_str!("rl_mmdhandex_v1.rs")),
     (77, "rl_mmdhandex_v2", include_str!("rl_mmdhandex_v2.rs")),
     (78, "rl_mmdhandexv2branch_v1", include_str!("rl_mmdhandexv2branch_v1.rs")),
+    (79, "rl_scratch_v1", include_str!("rl_scratch_v1.rs")),
 ];
 
 /// 凍結版 `name` が**自分のファイルの中で**読む `TSUITATE_*` の一覧。
@@ -487,12 +489,12 @@ mod tests {
         assert_eq!(versions_using("king_belief_nn"), vec!["estimator_v14"]);
         // 自駒の再構成は estimator の凍結版も rl_v15 も使う（v15 の凍結で pin に加えた）
         let model_users = versions_using("model");
-        for name in ["rl_v15", "rl_v16", "rl_v17", "rl_v18", "rl_v19", "rl_v20", "rl_v21", "rl_v22", "rl_v23", "rl_v24", "rl_v25", "rl_v26", "rl_v27", "rl_v28", "rl_v29", "rl_v29branch_v1", "rl_v30", "rl_selfplay_v1", "rl_selfplay_v2", "rl_selfplay_v3", "rl_selfplay_v4", "rl_deduce_v1", "rl_deduce_v2", "rl_deduce_v3", "rl_deduce_v4", "rl_deduce_v5", "rl_deduce_v6", "rl_deduce_v7", "rl_deduce_v8", "rl_deduce_v9", "rl_deduce_v10", "rl_mmd_v1", "rl_mmd_v2", "rl_mmd_v3", "rl_mmd_v4", "rl_mmdopen_v1", "rl_mmdopen_v2", "rl_mmdopen_v3", "rl_mmdopen_v4", "rl_mmdopen_v5", "rl_mmdopen_v6", "rl_mmdopen_v7", "rl_mmdopen_v8", "rl_mmdopen_v9", "rl_mmdopen_v10", "rl_mmdopen_v11", "rl_mmdopen_v12", "rl_mmdopen_v13", "rl_mmdopen_v14", "rl_mmdopen_v15", "rl_mmdhand_v1", "rl_mmdhandv1branch_v1", "rl_mmdhandex_v1", "rl_mmdhandex_v2", "rl_mmdhandexv2branch_v1", "rl_mmdgae_v1", "rl_mmdv3branch_v1", "rl_nyugyoku_v1", "rl_nyugyoku_v2", "rl_speed_v1", "rl_speed_v2", "rl_speed_v3", "rl_speed_v4", "rl_guard_v1", "estimator_v14"] {
+        for name in ["rl_v15", "rl_v16", "rl_v17", "rl_v18", "rl_v19", "rl_v20", "rl_v21", "rl_v22", "rl_v23", "rl_v24", "rl_v25", "rl_v26", "rl_v27", "rl_v28", "rl_v29", "rl_v29branch_v1", "rl_v30", "rl_selfplay_v1", "rl_selfplay_v2", "rl_selfplay_v3", "rl_selfplay_v4", "rl_deduce_v1", "rl_deduce_v2", "rl_deduce_v3", "rl_deduce_v4", "rl_deduce_v5", "rl_deduce_v6", "rl_deduce_v7", "rl_deduce_v8", "rl_deduce_v9", "rl_deduce_v10", "rl_mmd_v1", "rl_mmd_v2", "rl_mmd_v3", "rl_mmd_v4", "rl_mmdopen_v1", "rl_mmdopen_v2", "rl_mmdopen_v3", "rl_mmdopen_v4", "rl_mmdopen_v5", "rl_mmdopen_v6", "rl_mmdopen_v7", "rl_mmdopen_v8", "rl_mmdopen_v9", "rl_mmdopen_v10", "rl_mmdopen_v11", "rl_mmdopen_v12", "rl_mmdopen_v13", "rl_mmdopen_v14", "rl_mmdopen_v15", "rl_mmdhand_v1", "rl_mmdhandv1branch_v1", "rl_mmdhandex_v1", "rl_mmdhandex_v2", "rl_mmdhandexv2branch_v1", "rl_mmdgae_v1", "rl_mmdv3branch_v1", "rl_nyugyoku_v1", "rl_nyugyoku_v2", "rl_speed_v1", "rl_speed_v2", "rl_speed_v3", "rl_speed_v4", "rl_guard_v1", "rl_scratch_v1", "estimator_v14"] {
             assert!(model_users.contains(&name), "{name}");
         }
         // 観測からの演繹は estimator の v8〜v14 と、エンコーダ v2 の方策ネット（rl_deduce_v1〜）が使う
         let deduce_users = versions_using("deduce");
-        for name in ["estimator_v8", "estimator_v9", "estimator_v10", "estimator_v11", "estimator_v12", "estimator_v13", "estimator_v14", "rl_deduce_v1", "rl_deduce_v2", "rl_deduce_v3", "rl_deduce_v4", "rl_deduce_v5", "rl_deduce_v6", "rl_deduce_v7", "rl_deduce_v8", "rl_deduce_v9", "rl_deduce_v10", "rl_mmd_v1", "rl_mmd_v2", "rl_mmd_v3", "rl_mmd_v4", "rl_mmdopen_v1", "rl_mmdopen_v2", "rl_mmdopen_v3", "rl_mmdopen_v4", "rl_mmdopen_v5", "rl_mmdopen_v6", "rl_mmdopen_v7", "rl_mmdopen_v8", "rl_mmdopen_v9", "rl_mmdopen_v10", "rl_mmdopen_v11", "rl_mmdopen_v12", "rl_mmdopen_v13", "rl_mmdopen_v14", "rl_mmdopen_v15", "rl_mmdhand_v1", "rl_mmdhandv1branch_v1", "rl_mmdhandex_v1", "rl_mmdhandex_v2", "rl_mmdhandexv2branch_v1", "rl_mmdgae_v1", "rl_mmdv3branch_v1"] {
+        for name in ["estimator_v8", "estimator_v9", "estimator_v10", "estimator_v11", "estimator_v12", "estimator_v13", "estimator_v14", "rl_deduce_v1", "rl_deduce_v2", "rl_deduce_v3", "rl_deduce_v4", "rl_deduce_v5", "rl_deduce_v6", "rl_deduce_v7", "rl_deduce_v8", "rl_deduce_v9", "rl_deduce_v10", "rl_mmd_v1", "rl_mmd_v2", "rl_mmd_v3", "rl_mmd_v4", "rl_mmdopen_v1", "rl_mmdopen_v2", "rl_mmdopen_v3", "rl_mmdopen_v4", "rl_mmdopen_v5", "rl_mmdopen_v6", "rl_mmdopen_v7", "rl_mmdopen_v8", "rl_mmdopen_v9", "rl_mmdopen_v10", "rl_mmdopen_v11", "rl_mmdopen_v12", "rl_mmdopen_v13", "rl_mmdopen_v14", "rl_mmdopen_v15", "rl_mmdhand_v1", "rl_mmdhandv1branch_v1", "rl_mmdhandex_v1", "rl_mmdhandex_v2", "rl_mmdhandexv2branch_v1", "rl_mmdgae_v1", "rl_mmdv3branch_v1", "rl_scratch_v1"] {
             assert!(deduce_users.contains(&name), "{name}");
         }
         assert!(!deduce_users.contains(&"rl_selfplay_v4"));
@@ -648,6 +650,8 @@ mod tests {
 
     /// 方策ネットの凍結版 `rl_vN`・`rl_<系列>_vN` は元の重み（`rl_policy:models/<名前>.bin`）と
     /// **同じ seed なら同じ手を指す**（`SOURCES` の rl_ 版を全部検査する）。
+    /// 序盤の定跡を内蔵した版（`rl_scratch_v1` から）は、元の重みを同じ定跡（`models/<名前>.openings.json`）の
+    /// 同じ seed の予定で包んだもの（= `open:book:rl_policy:<重み>` と同じ作り）と比べる。
     /// 審判で数局を進め、手番ごとに両者へ同じ入力を渡して一手ずつ突き合わせる
     /// （arena 100局の 50%±10 より強い同一性の担保）。debug の推論は1回 約0.1秒と重い
     /// （1版3局で約4分）ので release 専用で、CI は test.yml の release ステップで回す
@@ -673,6 +677,22 @@ mod tests {
                 crate::rl::policy::PREFIX_BASIC
             };
             let name = format!("{prefix}{path}");
+            // 序盤の定跡を内蔵した版: 埋め込んだ定跡の固定コピーを読み、元の重みを同じ予定で包む
+            let book = src.contains("pub mod forced").then(|| {
+                let json = std::fs::read_to_string(format!("{}/models/{version}.openings.json", env!("CARGO_MANIFEST_DIR")))
+                    .expect("定跡の固定コピーが無い");
+                crate::rl::forced::book_from_json(&json, 1.0, None, crate::rl::forced::ForcedSides::Both).unwrap()
+            });
+            let make_orig = |seed: u64| -> Box<dyn Strategy> {
+                let inner: Box<dyn Strategy> = Box::new(crate::rl::policy::RlPolicy::from_name(&name, Some(seed)).unwrap());
+                match &book {
+                    Some(b) => Box::new(crate::rl::forced::ForcedOpening::new(
+                        inner,
+                        crate::rl::forced::book_plan(b, seed).unwrap(),
+                    )),
+                    None => inner,
+                }
+            };
             // 突き合わせた試行数は3局の合計で見る（1局だけ反則負けや早い詰みで短く終わるのは正当。
             // rl_deduce_v7 の局 0 は 20 試行で終わった）。3局で 60 試行に届かなければ局を足す
             // （rl_mmdopen_v7 は3局がどれも早く終わり、ちょうど 60 試行だった。手は全部一致）
@@ -683,10 +703,7 @@ mod tests {
                     crate::strategy::make_seeded(version, game).unwrap(),
                     crate::strategy::make_seeded(version, game + 100).unwrap(),
                 ];
-                let mut orig = [
-                    crate::rl::policy::RlPolicy::from_name(&name, Some(game)).unwrap(),
-                    crate::rl::policy::RlPolicy::from_name(&name, Some(game + 100)).unwrap(),
-                ];
+                let mut orig = [make_orig(game), make_orig(game + 100)];
                 let mut referee = Referee::new();
                 let mut steps = 0;
                 while referee.ended().is_none() && steps < 400 {

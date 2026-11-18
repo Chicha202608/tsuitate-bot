@@ -21,7 +21,9 @@
 //! - TSUITATE_WEBHOOK_LOG_DIR（既定 未設定＝無効）: 設定すると、検証済みリクエストの
 //!   生payload・応答・所要時間を `<dir>/<gameId>.jsonl` に1行1リクエストで追記する
 //!   （本体の TSUITATE_RECORD_DIR と同じ「対局ごとに1ファイル」の思想。
-//!   実戦での「弱く感じる」挙動を後から再現・分析するための診断用）
+//!   実戦での「弱く感じる」挙動を後から再現・分析するための診断用）。
+//!   終局通知（`type: game_end`）も同じファイルの末尾に `{"ts", "game_end": ...}` で
+//!   残る。`game_end.param` に相手の手も含む真の棋譜・対局者名・終局理由が入る
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -32,7 +34,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use tsuitate_bot::strategy;
 use tsuitate_bot::webhook_hmac;
-use tsuitate_bot::webhook_protocol::BotTurnRequest;
+use tsuitate_bot::webhook_protocol::{BotTurnRequest, GameEndNotice, is_game_end};
 use tsuitate_bot::webhook_session::{SessionStore, choose_move};
 
 const MAX_BODY_BYTES: u64 = 128 * 1024;
@@ -192,6 +194,14 @@ fn handle(
         return;
     }
 
+    // 終局通知は手番の通知と形が違う（positions も requestId も無い）ので先に振り分ける
+    if let Ok(raw) = serde_json::from_slice::<serde_json::Value>(&body)
+        && is_game_end(&raw)
+    {
+        handle_game_end(request, raw, log_dir);
+        return;
+    }
+
     let payload: BotTurnRequest = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
@@ -229,6 +239,34 @@ fn handle(
     }
 }
 
+/// 終局通知（`type: game_end`）を受ける。真の棋譜（`param`）を手番ログと同じ
+/// `<dir>/<gameId>.jsonl` の末尾に `{"ts", "game_end": <生payload>}` の1行で残し、
+/// 仕様どおり本文なしの 204 を返す（再送されないので、ログ失敗でも 204 を返す）
+fn handle_game_end(request: tiny_http::Request, raw: serde_json::Value, log_dir: Option<&str>) {
+    match serde_json::from_value::<GameEndNotice>(raw.clone()) {
+        Ok(end) => {
+            println!(
+                "[{}] game_end result={} winner={}",
+                end.game_id,
+                end.result.as_deref().unwrap_or("?"),
+                end.winner.as_deref().unwrap_or("-"),
+            );
+            if let Some(dir) = log_dir {
+                let line = serde_json::json!({
+                    "ts": webhook_hmac::unix_now(),
+                    "game_end": raw,
+                });
+                append_line(&format!("{dir}/{}.jsonl", end.game_id), &line);
+            }
+        }
+        Err(e) => eprintln!("game_end の解析に失敗: {e}"),
+    }
+    let response = Response::empty(204);
+    if let Err(e) = request.respond(response) {
+        eprintln!("レスポンス送信に失敗: {e}");
+    }
+}
+
 /// 検証済みリクエストの生payload・応答・所要時間を `<dir>/<gameId>.jsonl` に1行追記する
 fn log_raw_request(
     dir: &str,
@@ -246,8 +284,11 @@ fn log_raw_request(
         "request": raw,
         "response": response,
     });
-    let path = format!("{dir}/{}.jsonl", payload.game_id);
-    let file = OpenOptions::new().create(true).append(true).open(&path);
+    append_line(&format!("{dir}/{}.jsonl", payload.game_id), &line);
+}
+
+fn append_line(path: &str, line: &serde_json::Value) {
+    let file = OpenOptions::new().create(true).append(true).open(path);
     match file {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{line}") {

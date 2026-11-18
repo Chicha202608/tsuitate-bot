@@ -108,6 +108,37 @@ pub struct RequiredPlayers {
     pub w: u32,
 }
 
+/// 終局通知の `type`
+pub const GAME_END_KIND: &str = "game_end";
+
+/// 終局通知（`type: "game_end"`）。各Bot・各対局につき最大1回、再送なし。
+/// 応答は本文なしの HTTP 204。`param` は Bot 一覧の棋譜ダウンロードと同じ形式で、
+/// **相手の手も伏せられていない真の棋譜**（`moves=` / `move_durations=` /
+/// `black_player=` / `white_player=` 等）が入る
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameEndNotice {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub bot_id: Option<String>,
+    pub game_id: String,
+    #[serde(default)]
+    pub param: String,
+    /// Checkmate / LossByFoul / Draw / Resign / TimeUp / WinByTry
+    #[serde(default)]
+    pub result: Option<String>,
+    /// "b" | "w"、引き分けなら null
+    #[serde(default)]
+    pub winner: Option<String>,
+}
+
+/// payload の `type` を見て終局通知かどうかを判定する（手番の通知は `type` が
+/// 省略されることがあるので、`game_end` と明示されたものだけを終局とみなす）
+pub fn is_game_end(raw: &serde_json::Value) -> bool {
+    raw.get("type").and_then(|t| t.as_str()) == Some(GAME_END_KIND)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +220,40 @@ mod tests {
         assert_eq!(entry.last_move.as_deref(), Some("+1512HI"));
         assert_eq!(entry.last_capture.as_deref(), Some("P"));
         assert_eq!(entry.last_info, Some(INFO_CHECK));
+    }
+
+    /// 仕様書の例そのまま
+    #[test]
+    fn parses_game_end_notice() {
+        let json = r#"{
+            "type": "game_end",
+            "botId": "7c1d0e5b9a2f4c3e8d6b1a90",
+            "gameId": "4f31a682d9c04b55b51aa231",
+            "param": "&visibility_rule=tsuitate&black_player=Alice&white_player=Bot&moves=+7776FU-0000ZA&move_durations=2.00-1.00",
+            "result": "Resign",
+            "winner": "b"
+        }"#;
+        let raw: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(is_game_end(&raw));
+        let end: GameEndNotice = serde_json::from_value(raw).unwrap();
+        assert_eq!(end.game_id, "4f31a682d9c04b55b51aa231");
+        assert_eq!(end.result.as_deref(), Some("Resign"));
+        assert_eq!(end.winner.as_deref(), Some("b"));
+        assert!(end.param.contains("moves=+7776FU"));
+    }
+
+    #[test]
+    fn game_end_winner_null_is_draw() {
+        let json = r#"{"type":"game_end","gameId":"g","param":"","result":"Draw","winner":null}"#;
+        let end: GameEndNotice = serde_json::from_str(json).unwrap();
+        assert!(end.winner.is_none());
+    }
+
+    #[test]
+    fn your_turn_is_not_game_end() {
+        let with_type: serde_json::Value = serde_json::json!({"type": "your_turn"});
+        let without_type: serde_json::Value = serde_json::json!({"gameId": "g"});
+        assert!(!is_game_end(&with_type));
+        assert!(!is_game_end(&without_type));
     }
 }

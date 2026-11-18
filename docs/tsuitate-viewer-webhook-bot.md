@@ -50,6 +50,14 @@ strategy.rs/NN特徴量にモジュール横断でハードコードされてお
   `+4741NY`×4・`-2629NY`×8 等。Socket.IO 版の `client.rs` は自分の送った USI を
   そのまま覚えるので起きない webhook 固有のバグ）。`advance` は「着手前に from に
   いた自駒の成り先 == 末尾の駒種2文字」なら `wasPromotion` に依らず成りとみなす
+- **終局通知 `type: game_end`**（2026-11-18 対応）: 終局後に1回だけ（再送なし）
+  `{type, botId, gameId, param, result, winner}` が届く。`param` は Bot 一覧の
+  棋譜ダウンロードと同じ形式で、**相手の手も伏せられていない真の棋譜**
+  （`moves=` / `move_durations=` / `black_player=` / `white_player=` 等）。
+  `result` は Checkmate / LossByFoul / Draw / Resign / TimeUp / WinByTry、`winner` は
+  b / w / null。本文なしの 204 を返す。`TSUITATE_WEBHOOK_LOG_DIR` があれば手番ログと
+  同じ `<gameId>.jsonl` の末尾に `{"ts", "game_end": <生payload>}` の1行で残る
+  （対戦相手名・勝敗・真の手順はここからしか取れない）
 - `fouls` はプロトコル上任意。欠落時は標準ついたての初期残数（黒9・白9）として扱う
 - `fouls` が履歴途中で欠落しても、観測した反則イベントから累計を補完する
 - 同じ `requestId` を再送した場合は、セッションを進めず前回と同じCSA応答を返す

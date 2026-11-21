@@ -29,9 +29,9 @@ use crate::observation::{Observation, ObservationLog};
 use crate::protocol::{Color, PlayerView, Role};
 use crate::shogi::{HAND_ROLES, ShogiMove, hand_index, parse_usi};
 
-/// マスクの版。1 = 自駒視点だけ（`basic_legal_mask`）、2 = 観測からの確定反則も除く。
-/// 凍結版の同一性テストは、凍結ファイルがこの定数を持つかでどちらのマスクと比べるかを決める
-pub const MASK_VERSION: u32 = 2;
+/// マスクの版。1 = 自駒視点だけ、2 = 観測からの確定反則も除く、
+/// 3 = 捕獲を伴う開き王手の仮説を自駒による遮りで絞る。
+pub const MASK_VERSION: u32 = 3;
 
 pub const NUM_SQUARES: usize = 81;
 /// 方向×距離 64 ＋ 桂 2
@@ -203,8 +203,17 @@ pub fn basic_legal_mask(view: &PlayerView, foul_tried: &HashSet<String>) -> Vec<
 /// 除外で候補が尽きたときは旧マスクへ戻す（推論が健全なら、真の局面に合法手がある限り
 /// 尽きることはない。尽きる＝推論の前提が崩れているので、指せなくなるより安全側に倒す）
 pub fn legal_mask(view: &PlayerView, log: &ObservationLog, foul_tried: &HashSet<String>) -> Vec<bool> {
+    legal_mask_with_capture_paths(view, log, foul_tried, true)
+}
+
+pub(super) fn legal_mask_with_capture_paths(
+    view: &PlayerView,
+    log: &ObservationLog,
+    foul_tried: &HashSet<String>,
+    check_capture_paths: bool,
+) -> Vec<bool> {
     let candidates = candidate_usis(view);
-    let deduction = Deduction::new(view, log, foul_tried, &candidates.iter().cloned().collect());
+    let deduction = Deduction::new(view, log, foul_tried, &candidates.iter().cloned().collect(), check_capture_paths);
     let mut mask = vec![false; NUM_ACTIONS];
     let mut basic = vec![false; NUM_ACTIONS];
     let mut any = false;
@@ -239,7 +248,8 @@ pub struct DeducedFacts {
 
 pub fn deduced_facts(view: &PlayerView, log: &ObservationLog, foul_tried: &HashSet<String>) -> DeducedFacts {
     let candidates: HashSet<String> = candidate_usis(view).into_iter().collect();
-    let d = Deduction::new(view, log, foul_tried, &candidates);
+    // 学習済み方策への観測入力は従来どおり。経路の検査は行動マスクにだけ使う。
+    let d = Deduction::new(view, log, foul_tried, &candidates, false);
     let mut occupied: Vec<Coord> = d.occupied.into_iter().collect();
     occupied.sort_by_key(|c| (c.file, c.rank));
     let blocked = d
@@ -291,7 +301,7 @@ struct CheckerHyp {
 ///    - 駒を取っていれば（取られたマス X）: 直前の自分の手は合法だった＝相手の手の前は王手が
 ///      無かったので、王手駒は「X に来た着手駒」か「着手駒の元のマス O が空いて通った
 ///      飛び駒（開き王手）」しかない。O は玉の筋の上の空きマスで、その先に飛び駒が入る余地が
-///      あり、X へ1手で行ける位置（直線か桂跳び）に限られる。開き王手の飛び駒は O の先の
+///      あり、X へ1手で行ける位置（マスクv3では自駒に遮られない直線か桂跳び）に限られる。開き王手の飛び駒は O の先の
 ///      筋の上のマス
 ///
 ///    仮説 h に対して手が王手を解消し得ない条件:
@@ -358,6 +368,7 @@ impl Deduction {
         log: &ObservationLog,
         foul_tried: &HashSet<String>,
         candidates: &HashSet<String>,
+        check_capture_paths: bool,
     ) -> Self {
         let twins = foul_tried
             .iter()
@@ -438,7 +449,7 @@ impl Deduction {
         }
 
         let check = if view.you_in_check {
-            Self::checker_hyps(view, known_opponent)
+            Self::checker_hyps(view, known_opponent, check_capture_paths)
         } else {
             None
         };
@@ -451,7 +462,11 @@ impl Deduction {
     }
 
     /// 王手駒がいうるマスの集合（上の doc の H）。前提が崩れている（空になる）ときは None
-    fn checker_hyps(view: &PlayerView, captured_at: Option<Coord>) -> Option<(Coord, Vec<CheckerHyp>)> {
+    fn checker_hyps(
+        view: &PlayerView,
+        captured_at: Option<Coord>,
+        check_capture_paths: bool,
+    ) -> Option<(Coord, Vec<CheckerHyp>)> {
         let own: HashSet<Coord> = view
             .your_pieces
             .iter()
@@ -522,7 +537,12 @@ impl Deduction {
                         .iter()
                         .enumerate()
                         .take(squares.len().saturating_sub(1))
-                        .find(|&(_, &o)| o != x && reachable(o, x));
+                        .find(|&(_, &o)| {
+                            o != x
+                                && reachable(o, x)
+                                && (!check_capture_paths
+                                    || !own.iter().any(|&piece| passes_through(o, x, piece)))
+                        });
                     if let Some((oi, _)) = opens {
                         hyps.extend(
                             squares
@@ -591,7 +611,7 @@ mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
     fn deduce(view: &PlayerView, log: &ObservationLog, tried: &HashSet<String>) -> Deduction {
-        Deduction::new(view, log, tried, &candidate_usis(view).into_iter().collect())
+        Deduction::new(view, log, tried, &candidate_usis(view).into_iter().collect(), true)
     }
 
     #[test]
@@ -893,6 +913,27 @@ mod tests {
 
     fn allowed(view: &PlayerView, log: &ObservationLog, tried: &HashSet<String>, usi: &str) -> bool {
         legal_mask(view, log, tried)[encode_usi(usi, view.your_color).unwrap()]
+    }
+
+    #[test]
+    fn 捕獲先への経路が自駒に遮られる開き王手候補を除く() {
+        let log = check_log(Some("4d"), Color::Gote);
+        let tried = HashSet::new();
+        let mut view = view_from_sfen(
+            "l6nl/r2kg1gb1/np3sp1p/p1pp1B1p1/9/1PP3KPP/P2P2P2/2R3GS1/LNS1G2NL",
+            Color::Gote,
+            &[(Role::Pawn, 2)],
+        );
+        let escape = "6b5c";
+        let action = encode_usi(escape, Color::Gote).unwrap();
+
+        // 8四→4四は7四歩・6四歩を越せない。5三は4四から6二への王手線上。
+        assert!(legal_mask_with_capture_paths(&view, &log, &tried, false)[action]);
+        assert!(!allowed(&view, &log, &tried, escape));
+
+        // 8四飛→4四で9五角の王手が通る場合は、5三玉で逃げられる。
+        view.your_pieces.retain(|piece| !matches!(piece.square.as_str(), "7d" | "6d"));
+        assert!(allowed(&view, &log, &tried, escape));
     }
 
     /// webhook の実戦（2026-10-02、gameId 8b91eec3…）: 39手目に 3九の金を取られて 7九の玉に王手。

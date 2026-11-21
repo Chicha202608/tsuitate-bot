@@ -16,6 +16,7 @@ pub mod checkpoint;
 pub mod client;
 pub mod config;
 pub mod deduce;
+pub mod deduce_king;
 pub mod estimator;
 pub mod eval_rank;
 pub mod effect_profile;

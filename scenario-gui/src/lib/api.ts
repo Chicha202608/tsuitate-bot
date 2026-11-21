@@ -52,6 +52,8 @@ export interface MoveRow {
 export interface KifuData {
   path: string;
   name: string;
+  /** 終局行の後に残った反則試行（最後の手番の反則。USI） */
+  trailingFouls: string[];
   totalPlies: number;
   directivePly: number | null;
   target: string | null;
@@ -182,6 +184,39 @@ export interface PlayView {
   capturedSquare: string | null;
 }
 
+/** 入力プレーン1枚（方策ネットのエンコーダが書いた値そのまま） */
+export interface PlaneView {
+  /** プレーン番号（0 始まり）。入力には無い参考の1枚は null */
+  index: number | null;
+  group: string;
+  label: string;
+  /** 足したエンコーダの版（"v1"〜"v5"。参考の1枚は "参考"） */
+  version: string;
+  /** 全面に同じ値を入れるプレーンなら、その値 */
+  scalar: number | null;
+  /** 値の読み方（「3枚」「2回」など） */
+  note: string | null;
+  /** マスごとの値（0 のマスは入っていない）。全面のプレーンでは空 */
+  cells: Record<string, number>;
+}
+
+export interface PlanesOut {
+  /** どちらの席の観測か */
+  side: Color;
+  moveNumber: number;
+  /** その席が手番か */
+  toMove: boolean;
+  planes: PlaneView[];
+}
+
+/** 値が 0 か 1 だけのプレーンか（盤に重ねるとき数字を出さない） */
+export const isBinaryPlane = (cells: Record<string, number>): boolean =>
+  Object.values(cells).every((v) => v === 1);
+
+/** プレーンを選ぶときのキー（番号。参考の1枚は見出し） */
+export const planeKey = (p: PlaneView): string =>
+  p.index == null ? `extra:${p.label}` : String(p.index);
+
 export const listScenarios = () => invoke<ScenarioInfo[]>("list_scenarios");
 export const getEngines = () => invoke<string[]>("engines");
 export const loadKifu = (path: string) => invoke<KifuData>("load_kifu", { path });
@@ -236,3 +271,13 @@ export const playResign = () => invoke<PlayView>("play_resign");
 export const playView = () => invoke<PlayView>("play_view");
 export const playExport = (fileName: string, ply: number | null, desc: string | null) =>
   invoke<string>("play_export", { fileName, ply, desc });
+/** `side` の席の観測から作った入力プレーン（対局モード） */
+export const playPlanes = (side: Color) => invoke<PlanesOut>("play_planes", { side });
+/** ここまでの対局を振り返り用の一時ファイルへ書き出す。戻り値は .kif のパス */
+export const playReview = () => invoke<string>("play_review");
+/**
+ * 棋譜を `ply` 手まで再生し、その手番で `foulsDone` 回反則した後の `side` の席の入力プレーン
+ * （リプレイ。0 = 手番の頭）
+ */
+export const kifuPlanes = (path: string, ply: number, foulsDone: number, side: Color) =>
+  invoke<PlanesOut>("kifu_planes", { path, ply, foulsDone, side });

@@ -23,6 +23,7 @@ use tsuitate_bot::board::{
 use tsuitate_bot::kifu::{kif_body, role_kanji};
 use tsuitate_bot::observation::{Observation, ObservationLog};
 use tsuitate_bot::protocol::{Color, Role};
+use tsuitate_bot::rl::plane_view::{PlaneView, plane_views};
 use tsuitate_bot::scenario_core::{make_view, scenarios_dir, side_idx};
 use tsuitate_bot::shogi::{Outcome, Position, ShogiMove, parse_usi, unpromote_role};
 use tsuitate_bot::strategy::{self, Strategy};
@@ -101,23 +102,79 @@ struct BotSide {
     foul_tried: HashSet<String>,
 }
 
+/// 人間側の対局者。指し手は GUI から来るが、観測ログと反則試行メモは bot と同じ形で持つ
+/// （その席から見た入力プレーンを出すため。bot には渡らない）
+#[derive(Default)]
+struct HumanSide {
+    log: ObservationLog,
+    foul_tried: HashSet<String>,
+}
+
 enum Player {
-    Human,
+    Human(HumanSide),
     Bot(BotSide),
 }
 
 impl Player {
     fn name(&self) -> String {
         match self {
-            Player::Human => "人間".into(),
+            Player::Human(_) => "人間".into(),
             Player::Bot(b) => b.engine.clone(),
         }
     }
 
     fn seed(&self) -> Option<u64> {
         match self {
-            Player::Human => None,
+            Player::Human(_) => None,
             Player::Bot(b) => Some(b.seed),
+        }
+    }
+
+    /// この席の観測ログと、今の手番で反則した手
+    fn seat(&self) -> (&ObservationLog, &HashSet<String>) {
+        match self {
+            Player::Human(h) => (&h.log, &h.foul_tried),
+            Player::Bot(b) => (&b.log, &b.foul_tried),
+        }
+    }
+
+    fn seat_mut(&mut self) -> (&mut ObservationLog, &mut HashSet<String>) {
+        match self {
+            Player::Human(h) => (&mut h.log, &mut h.foul_tried),
+            Player::Bot(b) => (&mut b.log, &mut b.foul_tried),
+        }
+    }
+}
+
+/// ある席の観測から作った入力プレーン（`play_planes` / `kifu_planes` の戻り値）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanesOut {
+    /// どちらの席の観測か
+    side: Color,
+    /// いまの手数（次に指す手が何手目か）
+    move_number: u32,
+    /// その席が手番か（手番でない席は「相手が考えている間」の観測）
+    to_move: bool,
+    pub(crate) planes: Vec<PlaneView>,
+}
+
+impl PlanesOut {
+    /// `side` の席の入力プレーン。エンコーダが読むのと同じ3つ（視界・観測ログ・今の手番の反則試行）から作る。
+    /// 対局中の表示（`PlaySession::planes`）と棋譜の再生（`kifu_planes`）が同じ関数を通る
+    pub(crate) fn of(
+        pos: &Position,
+        fouls: &[u32; 2],
+        side: Color,
+        log: &ObservationLog,
+        foul_tried: &HashSet<String>,
+    ) -> Self {
+        let view = make_view(pos, side, fouls);
+        Self {
+            side,
+            move_number: pos.move_number(),
+            to_move: pos.turn() == side,
+            planes: plane_views(&view, log, foul_tried),
         }
     }
 }
@@ -164,9 +221,9 @@ impl PlaySession {
         // 思考予算は戦略の構築時に env から読まれる（eval と同じ仕組み）
         let bot = with_budget(budget_ms, || make_bot(&engine, seed))?;
         let players = if human == Color::Sente {
-            [Player::Human, bot]
+            [Player::Human(HumanSide::default()), bot]
         } else {
-            [bot, Player::Human]
+            [bot, Player::Human(HumanSide::default())]
         };
         Ok(Self::with_players(players, Some(human), budget_ms))
     }
@@ -216,14 +273,37 @@ impl PlaySession {
         format!("{}（{}）", mark(c), self.player(c).name())
     }
 
-    /// 全 bot の観測ログへ、**その bot 自身の視点で**記録する。
-    /// f は「その色の対局者から見た観測」を返す（人間側は記録先が無いので無視される）
+    /// 両者の観測ログへ、**その席自身の視点で**記録する。
+    /// f は「その色の対局者から見た観測」を返す（人間側のログは入力プレーンの表示にだけ使う）
     fn record_each(&mut self, f: impl Fn(Color) -> Observation) {
         for c in SIDES {
-            if let Player::Bot(b) = &mut self.players[side_idx(c)] {
-                b.log.record(f(c));
-            }
+            self.players[side_idx(c)].seat_mut().0.record(f(c));
         }
+    }
+
+    /// `side` の席の観測から作った入力プレーン（エンコーダが読むのと同じ3つ = 視界・観測ログ・
+    /// 今の手番の反則試行から作る）
+    fn planes(&self, side: Color) -> PlanesOut {
+        let (log, foul_tried) = self.player(side).seat();
+        PlanesOut::of(&self.pos, &self.fouls, side, log, foul_tried)
+    }
+
+    /// 振り返り用に、ここまでの対局を一時ファイルの `.kif` へ書き出してパスを返す（scenarios/ は汚さない）。
+    /// リプレイ画面はパスから棋譜を読むので、候補手分析・入力プレーンの再生がそのまま使える
+    fn review_file(&self) -> Result<String, String> {
+        if self.moves.is_empty() && self.foul_attempts.is_empty() {
+            return Err("まだ指し手がありません".into());
+        }
+        let text = self.kif_text(None, None)?;
+        let dir = std::env::temp_dir().join("tsuitate-scenario-gui");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("review-{stamp}.kif"));
+        std::fs::write(&path, text).map_err(|e| format!("{} に書けません: {e}", path.display()))?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     fn finish(&mut self, winner: Color, reason: &str, events: &mut Vec<String>) {
@@ -280,9 +360,7 @@ impl PlaySession {
             }
         });
         // 受理されたので、指した側の反則試行メモは破棄
-        if let Player::Bot(b) = &mut self.players[side_idx(mover)] {
-            b.foul_tried.clear();
-        }
+        self.players[side_idx(mover)].seat_mut().1.clear();
 
         let captured_ja = captured.map(|r| role_kanji(unpromote_role(r)));
         match self.human {
@@ -343,9 +421,7 @@ impl PlaySession {
                 Observation::OpponentFoul { count }
             }
         });
-        if let Player::Bot(b) = &mut self.players[idx] {
-            b.foul_tried.insert(usi.clone());
-        }
+        self.players[idx].seat_mut().1.insert(usi.clone());
 
         events.push(match self.human {
             Some(h) if side == h => format!("反則: {usi}（あなたの反則 累計{count}回）"),
@@ -392,7 +468,7 @@ impl PlaySession {
             let view = make_view(&self.pos, side, &self.fouls);
             let chosen = match &mut self.players[side_idx(side)] {
                 Player::Bot(b) => b.strat.choose(&view, &b.log, &b.foul_tried),
-                Player::Human => unreachable!("bot 手番を確認済み"),
+                Player::Human(_) => unreachable!("bot 手番を確認済み"),
             };
             let Some(usi) = chosen else {
                 events.push(match self.human {
@@ -654,6 +730,19 @@ pub async fn play_view(state: State<'_, PlayState>) -> Result<PlayView, String> 
     .await
 }
 
+/// `side` の席の観測から作った入力プレーン（方策ネットのエンコーダ v5 の全プレーン）。
+/// 対人モードで bot 側を指定すると相手の駒の位置が見える（「真実を表示」と同じデバッグ用途）
+#[tauri::command]
+pub async fn play_planes(state: State<'_, PlayState>, side: Color) -> Result<PlanesOut, String> {
+    on_session(&state, move |slot| Ok(require(slot)?.planes(side))).await
+}
+
+/// ここまでの対局を振り返り用の一時ファイルへ書き出し、そのパスを返す（リプレイ画面で開く）
+#[tauri::command]
+pub async fn play_review(state: State<'_, PlayState>) -> Result<String, String> {
+    on_session(&state, |slot| require(slot)?.review_file()).await
+}
+
 /// 対局を `.kif` へ書き出す。file_name が相対ならリポジトリの scenarios/ に置く。
 /// 戻り値は書き出した絶対パス
 #[tauri::command]
@@ -811,5 +900,164 @@ mod tests {
         // 先手は「自分→相手」、後手は「相手→自分」の順で観測している
         assert_eq!(kinds[0], vec!["my", "opp"], "先手の観測");
         assert_eq!(kinds[1], vec!["opp", "my"], "後手の観測");
+    }
+
+    fn plane<'a>(out: &'a PlanesOut, label: &str) -> &'a PlaneView {
+        out.planes
+            .iter()
+            .find(|p| p.label == label)
+            .unwrap_or_else(|| panic!("プレーン「{label}」が無い"))
+    }
+
+    fn squares(p: &PlaneView) -> Vec<&str> {
+        p.cells.keys().map(String::as_str).collect()
+    }
+
+    /// 入力プレーンは席ごとの観測から作られる。人間の席にも観測ログと反則試行メモがあり、
+    /// 反則した手番の途中・受理された後・相手の席のどれでも、その席から見た値になる
+    #[test]
+    fn 入力プレーンは席ごとの観測から作られる() {
+        let mut s =
+            PlaySession::new_vs_bot("heuristic".into(), 1, 500, Color::Sente).expect("session");
+        s.human_move("5i5g").unwrap(); // 反則（手番は変わらない）
+        let mid = s.planes(Color::Sente);
+        assert!(mid.to_move);
+        assert_eq!(plane(&mid, "今の手番の反則数").note.as_deref(), Some("1回"));
+        assert_eq!(squares(plane(&mid, "今の手番の反則: 移動先")), ["5g"]);
+        assert_eq!(squares(plane(&mid, "今の手番の反則: 移動元")), ["5i"]);
+
+        s.human_move("7g7f").unwrap();
+        s.bot_move().unwrap();
+        let mine = s.planes(Color::Sente);
+        assert_eq!(mine.move_number, 3);
+        assert!(mine.to_move);
+        assert_eq!(squares(plane(&mine, "自駒 玉")), ["5i"]);
+        assert_eq!(squares(plane(&mine, "1手前の移動元")), ["7g"]);
+        assert_eq!(squares(plane(&mine, "1手前の移動先")), ["7f"]);
+        assert_eq!(plane(&mine, "自分の反則数").note.as_deref(), Some("1回"));
+        assert_eq!(plane(&mine, "今の手番の反則数").note.as_deref(), Some("0回"));
+        assert_eq!(plane(&mine, "手数").note.as_deref(), Some("3手目"));
+        // 受理された後は「過去の反則」に移る
+        assert!(squares(plane(&mine, "今の手番の反則: 移動先")).is_empty());
+        assert_eq!(squares(plane(&mine, "過去の反則: 移動先（鮮度）")), ["5g"]);
+
+        // bot の席（後手）: 盤は実際のマスのまま（180度回した値を戻してある）
+        let theirs = s.planes(Color::Gote);
+        assert!(!theirs.to_move);
+        assert_eq!(squares(plane(&theirs, "自駒 玉")), ["5a"]);
+        assert_eq!(plane(&theirs, "相手の反則数").note.as_deref(), Some("1回"));
+        assert_eq!(plane(&theirs, "自分の反則数").note.as_deref(), Some("0回"));
+    }
+
+    fn hint_usi(h: &PlayHint) -> String {
+        match &h.from {
+            Some(from) => format!("{from}{}{}", h.to, if h.promotion == "forced" { "+" } else { "" }),
+            None => tsuitate_bot::board::make_usi_drop(h.role, parse_usi_square(&h.to).unwrap()).unwrap(),
+        }
+    }
+
+    /// 「当時の入力」の再生: 振り返り用に書き出した棋譜から `kifu_planes_of` で作る入力は、対局中にその場で
+    /// 見えていた入力（`planes`）と同じになる。手番の頭・人間が反則した後・終局行の後に残る反則の後、の
+    /// どの時点でも、両方の席で比べる
+    #[test]
+    fn 棋譜から再生した入力は対局中の入力と同じ() {
+        let mut s =
+            PlaySession::new_vs_bot("heuristic".into(), 3, 300, Color::Sente).expect("session");
+        // ((手数, その手番の反則の数), [先手の席, 後手の席] の入力)
+        let mut live: Vec<((usize, usize), [Vec<PlaneView>; 2])> = vec![];
+        fn snap(live: &mut Vec<((usize, usize), [Vec<PlaneView>; 2])>, s: &PlaySession, k: usize) {
+            live.push((
+                (s.moves.len(), k),
+                [s.planes(Color::Sente).planes, s.planes(Color::Gote).planes],
+            ));
+        }
+        // 人間の手番: 自駒だけを見た候補のうち真の盤では反則になる手を、手番ごとに最大2回試してから合法手を指す
+        let human_fouls = |s: &mut PlaySession, live: &mut Vec<((usize, usize), [Vec<PlaneView>; 2])>| {
+            let fouls: Vec<String> = s
+                .hints()
+                .iter()
+                .map(hint_usi)
+                .filter(|u| parse_usi(u).is_some_and(|mv| !s.pos.is_legal(&mv)))
+                .take(2)
+                .collect();
+            for (k, usi) in fouls.iter().enumerate() {
+                if s.outcome.is_some() {
+                    break;
+                }
+                s.human_move(usi).unwrap();
+                snap(live, s, k + 1);
+            }
+            fouls.len()
+        };
+        let mut total_fouls = 0;
+        snap(&mut live, &s, 0);
+        while s.outcome.is_none() && s.moves.len() < 44 {
+            if s.pos.turn() == Color::Sente {
+                // 反則負けにならない範囲で反則を混ぜる
+                if s.fouls[0] < 6 {
+                    total_fouls += human_fouls(&mut s, &mut live);
+                }
+                let mv = s.pos.legal_moves().into_iter().next().expect("合法手");
+                s.human_move(&mv.to_usi()).unwrap();
+            } else {
+                s.bot_move().unwrap();
+            }
+            if s.outcome.is_none() {
+                snap(&mut live, &s, 0);
+            }
+        }
+        // 最後は人間の手番の反則で止める（終局行の後に残る反則試行の再生）
+        if s.outcome.is_none() && s.pos.turn() == Color::Sente && s.fouls[0] < 8 {
+            total_fouls += human_fouls(&mut s, &mut live);
+        }
+        assert!(total_fouls >= 3, "反則を挟んだ手番が足りない（{total_fouls} 回）");
+
+        let path = s.review_file().unwrap();
+        let kifu = parse_kif(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(kifu.plies.len(), s.moves.len());
+        for ((ply, k), [sente, gote]) in &live {
+            for (side, want) in [(Color::Sente, sente), (Color::Gote, gote)] {
+                let got = crate::kifu_planes_of(&kifu, *ply, *k, side).planes;
+                assert!(got == *want, "{ply}手・反則{k}回の後・{side:?}の席の入力が対局中と違う");
+            }
+        }
+        assert!(live.len() >= 20, "比べた時点が少ない（{}）", live.len());
+    }
+
+    /// ブラウザ単体の UI 確認（src/mock.ts、`?mock=1`）用の、対局モードのフィクスチャ生成。
+    /// 人間の席を方策ネットに指させて中盤まで進めた対人の局面と、両方の席の入力プレーンを書く。
+    /// `FIXTURE_DIR=$(pwd)/public/fixtures cargo test --manifest-path src-tauri/Cargo.toml -- --ignored fixtures`
+    #[test]
+    #[ignore]
+    fn dump_play_fixtures() {
+        let out = std::env::var("FIXTURE_DIR").expect("FIXTURE_DIR を指定してください");
+        std::fs::create_dir_all(&out).unwrap();
+        let engine = "rl_scratch5_v1";
+        let mut s = PlaySession::new_vs_bot(engine.into(), 11, 500, Color::Sente).expect("session");
+        let mut stand_in = strategy::make_seeded(engine, 12).expect("人間の席の代役");
+        // 王手を受けた人間の手番（55手目以降）で止める。来なければ 90手目で止める
+        while s.outcome.is_none() {
+            let human_turn = s.pos.turn() == Color::Sente;
+            let in_check = s.pos.in_check(Color::Sente);
+            if human_turn && ((s.moves.len() >= 54 && in_check) || s.moves.len() >= 90) {
+                break;
+            }
+            if human_turn {
+                let view = make_view(&s.pos, Color::Sente, &s.fouls);
+                let (log, tried) = s.player(Color::Sente).seat();
+                let usi = stand_in.choose(&view, log, tried).expect("代役の手");
+                s.human_move(&usi).unwrap();
+            } else {
+                s.bot_move().unwrap();
+            }
+        }
+        let write = |name: &str, v: serde_json::Value| {
+            std::fs::write(format!("{out}/{name}.json"), serde_json::to_string(&v).unwrap()).unwrap();
+        };
+        let events = vec![format!("（モック）{}手目まで進めた対人の局面", s.moves.len())];
+        write("play_view", serde_json::to_value(s.view(events)).unwrap());
+        write("play_planes_sente", serde_json::to_value(s.planes(Color::Sente)).unwrap());
+        write("play_planes_gote", serde_json::to_value(s.planes(Color::Gote)).unwrap());
     }
 }

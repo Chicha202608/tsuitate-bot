@@ -2,12 +2,14 @@
   import Board from "./Board.svelte";
   import InputPlanes from "./InputPlanes.svelte";
   import {
+    isBinaryPlane,
     planeKey,
     playBotMove,
     playExport,
     playHumanMove,
     playPlanes,
     playResign,
+    playReview,
     playStart,
     playStartBots,
     type Color,
@@ -17,8 +19,14 @@
     type Snapshot,
   } from "./api";
 
-  let { engines, onOpenKifu }: { engines: string[]; onOpenKifu: (path: string) => void } =
-    $props();
+  let {
+    engines,
+    onOpenKifu,
+  }: {
+    engines: string[];
+    /** 棋譜をリプレイで開く。showInput = 入力プレーンのタブを開いた状態にする */
+    onOpenKifu: (path: string, showInput?: boolean) => void;
+  } = $props();
 
   const DROP_LETTER: Partial<Record<Role, string>> = {
     pawn: "P",
@@ -356,6 +364,17 @@
     }
   }
 
+  // ここまでの対局を一時ファイルの kif にしてリプレイで開く（入力プレーンのタブつき）。
+  // 対局はこのパネルに残るので、「対局」タブへ戻れば続きを指せる
+  async function review() {
+    error = "";
+    try {
+      onOpenKifu(await playReview(), true);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function doExport() {
     error = "";
     exportedPath = "";
@@ -492,6 +511,7 @@
           selectedHandRole={selected?.kind === "hand" ? selected.role : null}
           onHandClick={handClick}
           overlay={planeOverlay}
+          overlayNumbers={planeOverlay == null || !isBinaryPlane(planeOverlay)}
         />
         {#if promo}
           <div class="promo">
@@ -557,12 +577,24 @@
             入力プレーン
           </button>
         </div>
+        <div class="status">
+          <button
+            onclick={review}
+            disabled={view.totalMoves === 0 || locked}
+            title="ここまでの棋譜をリプレイで開き、手を戻しながら当時の入力プレーンを見ます"
+          >
+            この対局を振り返る
+          </button>
+          {#if !over && !watching}
+            <span class="dim">対局中に開くと相手の駒が見えます</span>
+          {/if}
+        </div>
         {#if sideTab === "input"}
           <InputPlanes
             {planes}
             sides={inputSides}
             side={inputSide}
-            onSide={(c) => (inputSideChoice = c)}
+            onSide={(c) => (inputSideChoice = c as Color)}
             flipped={boardFlipped}
             selected={selectedPlane}
             onSelect={(k) => (selectedPlane = k)}
@@ -713,7 +745,8 @@
     flex-wrap: wrap;
   }
 
-  .status.dim {
+  .status.dim,
+  .status .dim {
     color: var(--text-dim);
   }
 

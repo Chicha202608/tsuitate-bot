@@ -52,6 +52,8 @@ export interface MoveRow {
 export interface KifuData {
   path: string;
   name: string;
+  /** 終局行の後に残った反則試行（最後の手番の反則。USI） */
+  trailingFouls: string[];
   totalPlies: number;
   directivePly: number | null;
   target: string | null;
@@ -207,6 +209,10 @@ export interface PlanesOut {
   planes: PlaneView[];
 }
 
+/** 値が 0 か 1 だけのプレーンか（盤に重ねるとき数字を出さない） */
+export const isBinaryPlane = (cells: Record<string, number>): boolean =>
+  Object.values(cells).every((v) => v === 1);
+
 /** プレーンを選ぶときのキー（番号。参考の1枚は見出し） */
 export const planeKey = (p: PlaneView): string =>
   p.index == null ? `extra:${p.label}` : String(p.index);
@@ -267,3 +273,11 @@ export const playExport = (fileName: string, ply: number | null, desc: string | 
   invoke<string>("play_export", { fileName, ply, desc });
 /** `side` の席の観測から作った入力プレーン（対局モード） */
 export const playPlanes = (side: Color) => invoke<PlanesOut>("play_planes", { side });
+/** ここまでの対局を振り返り用の一時ファイルへ書き出す。戻り値は .kif のパス */
+export const playReview = () => invoke<string>("play_review");
+/**
+ * 棋譜を `ply` 手まで再生し、その手番で `foulsDone` 回反則した後の `side` の席の入力プレーン
+ * （リプレイ。0 = 手番の頭）
+ */
+export const kifuPlanes = (path: string, ply: number, foulsDone: number, side: Color) =>
+  invoke<PlanesOut>("kifu_planes", { path, ply, foulsDone, side });

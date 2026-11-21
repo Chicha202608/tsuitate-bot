@@ -13,6 +13,8 @@ export async function installMockIfRequested(): Promise<void> {
     return res.json();
   };
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+    // イベントの購読（進捗の listen）が呼ぶ。モックではイベントは来ないので番号だけ返す
+    transformCallback: () => 0,
     invoke: async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd.startsWith("plugin:")) return null; // event listen / dialog open は何もしない
       switch (cmd) {
@@ -38,6 +40,11 @@ export async function installMockIfRequested(): Promise<void> {
           return fixture("play_view");
         case "play_planes":
           return fixture(`play_planes_${args?.side === "gote" ? "gote" : "sente"}`);
+        // 振り返り・リプレイの入力プレーン: どの手数でも同じ1局面ぶんを返す
+        case "play_review":
+          return "mock-review.kif";
+        case "kifu_planes":
+          return fixture("kifu_planes");
         default:
           throw new Error(`mock 未対応のコマンド: ${cmd}`);
       }

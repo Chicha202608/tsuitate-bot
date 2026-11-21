@@ -19,8 +19,8 @@ use tsuitate_bot::board::make_usi_square;
 use tsuitate_bot::kifu::{Kifu, parse_kif};
 use tsuitate_bot::protocol::{Color, Role};
 use tsuitate_bot::scenario_core::{
-    self as scenario_core, Replayed, choice_trial_one, ranking_one, replay, resolve_foul,
-    scenarios_dir, side_idx,
+    self as scenario_core, Replayed, apply_scenario_fouls, choice_trial_one, ranking_one, replay,
+    resolve_foul, scenarios_dir, side_idx,
 };
 use tsuitate_bot::shogi::{Position, ShogiMove, parse_usi};
 use tsuitate_bot::strategy::{self, CandidateScore};
@@ -173,6 +173,8 @@ struct MoveRow {
 struct KifuData {
     path: String,
     name: String,
+    /// 終局行の後に残った反則試行（最後の手番の反則。反則負けや対局途中の書き出しで出る）
+    trailing_fouls: Vec<String>,
     total_plies: usize,
     directive_ply: Option<usize>,
     /// *scenario target= があればそれ。無ければ directive_ply+1 手目の実際の手
@@ -258,6 +260,13 @@ fn load_kifu(path: String) -> Result<KifuData, String> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{path} を読めません: {e}"))?;
     let kifu = parse_kif(&text).map_err(|e| format!("{path}: {e}"))?;
     let (snapshots, moves) = catch(|| build_snapshots(&kifu))?;
+    let trailing_fouls = catch(|| {
+        let end = replay(&kifu, kifu.plies.len());
+        kifu.trailing_fouls
+            .iter()
+            .map(|f| resolve_foul(&end.pos, end.pos.turn(), f))
+            .collect::<Vec<String>>()
+    })?;
     let directive_ply: Option<usize> = kifu.directives.get("ply").and_then(|s| s.parse().ok());
     let target = kifu
         .directives
@@ -270,6 +279,7 @@ fn load_kifu(path: String) -> Result<KifuData, String> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
         path,
+        trailing_fouls,
         total_plies: kifu.plies.len(),
         directive_ply,
         target,
@@ -277,6 +287,48 @@ fn load_kifu(path: String) -> Result<KifuData, String> {
         snapshots,
         moves,
     })
+}
+
+// ---------- kifu_planes（棋譜の再生に合わせた入力プレーン） ----------
+
+/// 棋譜を `ply` 手まで再生し、その手番で `fouls_done` 回反則した後の、`side` の席の入力プレーン
+/// （方策ネットのエンコーダ v5）。`fouls_done` は次の手の前に棋譜に残っている反則試行のうち先頭から何回ぶんを
+/// 済ませたことにするか（0 = 手番の頭）。最後の局面（`ply` = 全手数）では終局行の後の反則試行を数える。
+/// 観測は `replay`（審判と同じ規約）が作るので、対局中にその席が受け取っていた入力と同じになる
+fn kifu_planes_of(kifu: &Kifu, ply: usize, fouls_done: usize, side: Color) -> play::PlanesOut {
+    assert!(ply <= kifu.plies.len(), "ply={ply} が全手数 {} を超えています", kifu.plies.len());
+    let mut rep = replay(kifu, ply);
+    let raw = kifu.plies.get(ply).map_or(&kifu.trailing_fouls, |p| &p.fouls);
+    assert!(
+        fouls_done <= raw.len(),
+        "この手番の反則試行は {} 回です（{fouls_done} 回は再生できません）",
+        raw.len()
+    );
+    let mover = rep.pos.turn();
+    let done: Vec<String> = raw[..fouls_done]
+        .iter()
+        .map(|f| resolve_foul(&rep.pos, mover, f))
+        .collect();
+    apply_scenario_fouls(&mut rep, &done);
+    // 今の手番の反則試行は手番側だけが持つ（相手の席には回数しか届かない）
+    let foul_tried: std::collections::HashSet<String> = if side == mover {
+        done.into_iter().collect()
+    } else {
+        Default::default()
+    };
+    play::PlanesOut::of(&rep.pos, &rep.fouls, side, &rep.logs[side_idx(side)], &foul_tried)
+}
+
+#[tauri::command]
+fn kifu_planes(
+    path: String,
+    ply: usize,
+    fouls_done: usize,
+    side: Color,
+) -> Result<play::PlanesOut, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path} を読めません: {e}"))?;
+    let kifu = parse_kif(&text).map_err(|e| format!("{path}: {e}"))?;
+    catch(|| kifu_planes_of(&kifu, ply, fouls_done, side))
 }
 
 // ---------- eval（集計・ランキング） ----------
@@ -630,6 +682,10 @@ mod tests {
 
         let rep = replayed_at(&path, ply).unwrap();
         let side = rep.pos.turn();
+        write(
+            "kifu_planes",
+            serde_json::to_value(kifu_planes(path.clone(), ply, 0, side).unwrap()).unwrap(),
+        );
         let trials: Vec<TrialOutcome> = (0..5)
             .map(|seed| {
                 let (accepted, fouls) = choice_trial_one(&rep, seed, "estimator");
@@ -736,6 +792,8 @@ fn main() {
             play::play_resign,
             play::play_view,
             play::play_planes,
+            play::play_review,
+            kifu_planes,
             play::play_export,
         ])
         .run(tauri::generate_context!())

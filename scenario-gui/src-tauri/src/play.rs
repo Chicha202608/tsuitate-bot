@@ -146,7 +146,7 @@ impl Player {
     }
 }
 
-/// ある席の観測から作った入力プレーン（`play_planes` の戻り値）
+/// ある席の観測から作った入力プレーン（`play_planes` / `kifu_planes` の戻り値）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanesOut {
@@ -156,7 +156,27 @@ pub struct PlanesOut {
     move_number: u32,
     /// その席が手番か（手番でない席は「相手が考えている間」の観測）
     to_move: bool,
-    planes: Vec<PlaneView>,
+    pub(crate) planes: Vec<PlaneView>,
+}
+
+impl PlanesOut {
+    /// `side` の席の入力プレーン。エンコーダが読むのと同じ3つ（視界・観測ログ・今の手番の反則試行）から作る。
+    /// 対局中の表示（`PlaySession::planes`）と棋譜の再生（`kifu_planes`）が同じ関数を通る
+    pub(crate) fn of(
+        pos: &Position,
+        fouls: &[u32; 2],
+        side: Color,
+        log: &ObservationLog,
+        foul_tried: &HashSet<String>,
+    ) -> Self {
+        let view = make_view(pos, side, fouls);
+        Self {
+            side,
+            move_number: pos.move_number(),
+            to_move: pos.turn() == side,
+            planes: plane_views(&view, log, foul_tried),
+        }
+    }
 }
 
 fn make_bot(engine: &str, seed: u64) -> Result<Player, String> {
@@ -264,14 +284,26 @@ impl PlaySession {
     /// `side` の席の観測から作った入力プレーン（エンコーダが読むのと同じ3つ = 視界・観測ログ・
     /// 今の手番の反則試行から作る）
     fn planes(&self, side: Color) -> PlanesOut {
-        let view = make_view(&self.pos, side, &self.fouls);
         let (log, foul_tried) = self.player(side).seat();
-        PlanesOut {
-            side,
-            move_number: self.pos.move_number(),
-            to_move: self.pos.turn() == side,
-            planes: plane_views(&view, log, foul_tried),
+        PlanesOut::of(&self.pos, &self.fouls, side, log, foul_tried)
+    }
+
+    /// 振り返り用に、ここまでの対局を一時ファイルの `.kif` へ書き出してパスを返す（scenarios/ は汚さない）。
+    /// リプレイ画面はパスから棋譜を読むので、候補手分析・入力プレーンの再生がそのまま使える
+    fn review_file(&self) -> Result<String, String> {
+        if self.moves.is_empty() && self.foul_attempts.is_empty() {
+            return Err("まだ指し手がありません".into());
         }
+        let text = self.kif_text(None, None)?;
+        let dir = std::env::temp_dir().join("tsuitate-scenario-gui");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{} を作れません: {e}", dir.display()))?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("review-{stamp}.kif"));
+        std::fs::write(&path, text).map_err(|e| format!("{} に書けません: {e}", path.display()))?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     fn finish(&mut self, winner: Color, reason: &str, events: &mut Vec<String>) {
@@ -705,6 +737,12 @@ pub async fn play_planes(state: State<'_, PlayState>, side: Color) -> Result<Pla
     on_session(&state, move |slot| Ok(require(slot)?.planes(side))).await
 }
 
+/// ここまでの対局を振り返り用の一時ファイルへ書き出し、そのパスを返す（リプレイ画面で開く）
+#[tauri::command]
+pub async fn play_review(state: State<'_, PlayState>) -> Result<String, String> {
+    on_session(&state, |slot| require(slot)?.review_file()).await
+}
+
 /// 対局を `.kif` へ書き出す。file_name が相対ならリポジトリの scenarios/ に置く。
 /// 戻り値は書き出した絶対パス
 #[tauri::command]
@@ -909,6 +947,82 @@ mod tests {
         assert_eq!(squares(plane(&theirs, "自駒 玉")), ["5a"]);
         assert_eq!(plane(&theirs, "相手の反則数").note.as_deref(), Some("1回"));
         assert_eq!(plane(&theirs, "自分の反則数").note.as_deref(), Some("0回"));
+    }
+
+    fn hint_usi(h: &PlayHint) -> String {
+        match &h.from {
+            Some(from) => format!("{from}{}{}", h.to, if h.promotion == "forced" { "+" } else { "" }),
+            None => tsuitate_bot::board::make_usi_drop(h.role, parse_usi_square(&h.to).unwrap()).unwrap(),
+        }
+    }
+
+    /// 「当時の入力」の再生: 振り返り用に書き出した棋譜から `kifu_planes_of` で作る入力は、対局中にその場で
+    /// 見えていた入力（`planes`）と同じになる。手番の頭・人間が反則した後・終局行の後に残る反則の後、の
+    /// どの時点でも、両方の席で比べる
+    #[test]
+    fn 棋譜から再生した入力は対局中の入力と同じ() {
+        let mut s =
+            PlaySession::new_vs_bot("heuristic".into(), 3, 300, Color::Sente).expect("session");
+        // ((手数, その手番の反則の数), [先手の席, 後手の席] の入力)
+        let mut live: Vec<((usize, usize), [Vec<PlaneView>; 2])> = vec![];
+        fn snap(live: &mut Vec<((usize, usize), [Vec<PlaneView>; 2])>, s: &PlaySession, k: usize) {
+            live.push((
+                (s.moves.len(), k),
+                [s.planes(Color::Sente).planes, s.planes(Color::Gote).planes],
+            ));
+        }
+        // 人間の手番: 自駒だけを見た候補のうち真の盤では反則になる手を、手番ごとに最大2回試してから合法手を指す
+        let human_fouls = |s: &mut PlaySession, live: &mut Vec<((usize, usize), [Vec<PlaneView>; 2])>| {
+            let fouls: Vec<String> = s
+                .hints()
+                .iter()
+                .map(hint_usi)
+                .filter(|u| parse_usi(u).is_some_and(|mv| !s.pos.is_legal(&mv)))
+                .take(2)
+                .collect();
+            for (k, usi) in fouls.iter().enumerate() {
+                if s.outcome.is_some() {
+                    break;
+                }
+                s.human_move(usi).unwrap();
+                snap(live, s, k + 1);
+            }
+            fouls.len()
+        };
+        let mut total_fouls = 0;
+        snap(&mut live, &s, 0);
+        while s.outcome.is_none() && s.moves.len() < 44 {
+            if s.pos.turn() == Color::Sente {
+                // 反則負けにならない範囲で反則を混ぜる
+                if s.fouls[0] < 6 {
+                    total_fouls += human_fouls(&mut s, &mut live);
+                }
+                let mv = s.pos.legal_moves().into_iter().next().expect("合法手");
+                s.human_move(&mv.to_usi()).unwrap();
+            } else {
+                s.bot_move().unwrap();
+            }
+            if s.outcome.is_none() {
+                snap(&mut live, &s, 0);
+            }
+        }
+        // 最後は人間の手番の反則で止める（終局行の後に残る反則試行の再生）
+        if s.outcome.is_none() && s.pos.turn() == Color::Sente && s.fouls[0] < 8 {
+            total_fouls += human_fouls(&mut s, &mut live);
+        }
+        assert!(total_fouls >= 3, "反則を挟んだ手番が足りない（{total_fouls} 回）");
+
+        let path = s.review_file().unwrap();
+        let kifu = parse_kif(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(kifu.plies.len(), s.moves.len());
+        for ((ply, k), [sente, gote]) in &live {
+            for (side, want) in [(Color::Sente, sente), (Color::Gote, gote)] {
+                let got = crate::kifu_planes_of(&kifu, *ply, *k, side).planes;
+                assert!(got == *want, "{ply}手・反則{k}回の後・{side:?}の席の入力が対局中と違う");
+            }
+        }
+        assert!(live.len() >= 20, "比べた時点が少ない（{}）", live.len());
     }
 
     /// ブラウザ単体の UI 確認（src/mock.ts、`?mock=1`）用の、対局モードのフィクスチャ生成。

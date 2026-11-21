@@ -15,6 +15,7 @@
     // マスに重ねる確率オーバーレイ（玉位置ビリーフ等）。値は [0,1]
     overlay = null,
     overlayTruth = null, // 真実のマス（枠で示す）
+    overlayNumbers = true, // オーバーレイに数字を出す（0/1 だけのプレーンでは駒が読みにくいので消す）
   }: {
     snapshot: Snapshot;
     flipped?: boolean;
@@ -27,6 +28,7 @@
     onHandClick?: ((role: Role) => void) | null;
     overlay?: Record<string, number> | null;
     overlayTruth?: string | null;
+    overlayNumbers?: boolean;
   } = $props();
 
   const KANJI: Record<Role, string> = {
@@ -164,7 +166,7 @@
                   style="background: rgba(106, 169, 255, {overlayAlpha(overlay[sq])})"
                   title={`${sq}: ${(overlay[sq] * 100).toFixed(2)}%${overlayTruth === sq ? "（真実）" : ""}`}
                 >
-                  {overlayLabel(overlay[sq])}
+                  {overlayNumbers ? overlayLabel(overlay[sq]) : ""}
                 </span>
               {:else if overlayTruth === sq && overlay}
                 <span class="overlay truth zero" title={`${sq}: 0%（真実だが信念ゼロ）`}>0</span>

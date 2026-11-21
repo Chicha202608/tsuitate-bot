@@ -1,8 +1,8 @@
 <script lang="ts">
-  // 対局モードの「入力プレーン」表示。ある席の観測から作った方策ネットの入力（エンコーダ v5 の全プレーン）を、
+  // 「入力プレーン」表示（対局モードとリプレイで共用）。ある席の観測から作った方策ネットの入力（エンコーダ v5 の全プレーン）を、
   // マスごとのプレーンは小さい盤、全面に同じ値を入れるプレーンは表で見せる。
   // 小さい盤をクリックすると、そのプレーンを左の盤に重ねる（親が overlay として Board に渡す）
-  import { planeKey as keyOf, type Color, type PlaneView, type PlanesOut } from "./api";
+  import { isBinaryPlane, planeKey as keyOf, type PlaneView, type PlanesOut } from "./api";
 
   let {
     planes,
@@ -16,10 +16,10 @@
     hiddenInfo = false,
   }: {
     planes: PlanesOut | null;
-    /** 切り替えられる席（[色, 表示名]） */
-    sides: [Color, string][];
-    side: Color;
-    onSide: (c: Color) => void;
+    /** 切り替えられる席（[キー, 表示名]。キーは親が決める: 色、リプレイでは「手番の席」も） */
+    sides: [string, string][];
+    side: string;
+    onSide: (key: string) => void;
     /** 盤の向き（左の盤と同じ。true = 後手が下） */
     flipped?: boolean;
     /** 盤に重ねているプレーンのキー */
@@ -111,7 +111,9 @@
         <span class="dim">
           {selectedPlane.scalar == null && Object.keys(selectedPlane.cells).length === 0
             ? "（この席では今は全マス 0）"
-            : "（盤の数字は値×100）"}
+            : isBinaryPlane(selectedPlane.cells)
+              ? "（色のついたマスが 1）"
+              : "（盤の数字は値×100）"}
         </span>
       </span>
       <button onclick={() => onSelect(null)}>重ねるのをやめる</button>

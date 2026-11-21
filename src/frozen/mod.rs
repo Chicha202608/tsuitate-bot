@@ -688,7 +688,13 @@ mod tests {
                 crate::rl::forced::book_from_json(&json, 1.0, None, crate::rl::forced::ForcedSides::Both).unwrap()
             });
             let make_orig = |seed: u64| -> Box<dyn Strategy> {
-                let inner: Box<dyn Strategy> = Box::new(crate::rl::policy::RlPolicy::from_name(&name, Some(seed)).unwrap());
+                let policy = crate::rl::policy::RlPolicy::from_name(&name, Some(seed)).unwrap();
+                let policy = if src.contains("pub const MASK_VERSION: u32 = 2;") {
+                    policy.with_mask_v2()
+                } else {
+                    policy
+                };
+                let inner: Box<dyn Strategy> = Box::new(policy);
                 match &book {
                     Some(b) => Box::new(crate::rl::forced::ForcedOpening::new(
                         inner,

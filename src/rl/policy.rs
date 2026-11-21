@@ -21,7 +21,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::observation::ObservationLog;
 use crate::protocol::PlayerView;
-use crate::rl::action::{basic_legal_mask, decode_usi, legal_mask};
+use crate::rl::action::{MASK_VERSION, basic_legal_mask, decode_usi, legal_mask, legal_mask_with_capture_paths};
 use crate::rl::encode::encode_planes;
 use crate::rl::policy_net::PolicyNet;
 use crate::strategy::Strategy;
@@ -68,7 +68,7 @@ pub struct RlPolicy {
     names: (&'static str, &'static str, &'static str),
     sha256: String,
     greedy: bool,
-    basic_mask: bool,
+    mask_version: u32,
     rng: StdRng,
     last: Option<serde_json::Value>,
 }
@@ -96,10 +96,16 @@ impl RlPolicy {
             names: loaded.names,
             sha256: loaded.sha256,
             greedy,
-            basic_mask,
+            mask_version: if basic_mask { 1 } else { MASK_VERSION },
             rng,
             last: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mask_v2(mut self) -> Self {
+        self.mask_version = 2;
+        self
     }
 }
 
@@ -110,10 +116,10 @@ impl Strategy for RlPolicy {
         log: &ObservationLog,
         foul_tried: &HashSet<String>,
     ) -> Option<String> {
-        let mask = if self.basic_mask {
-            basic_legal_mask(view, foul_tried)
-        } else {
-            legal_mask(view, log, foul_tried)
+        let mask = match self.mask_version {
+            1 => basic_legal_mask(view, foul_tried),
+            2 => legal_mask_with_capture_paths(view, log, foul_tried, false),
+            _ => legal_mask(view, log, foul_tried),
         };
         let legal: Vec<usize> = (0..mask.len()).filter(|&a| mask[a]).collect();
         if legal.is_empty() {
@@ -147,7 +153,7 @@ impl Strategy for RlPolicy {
             "value": value,
             "weights_sha256": self.sha256,
             "greedy": self.greedy,
-            "mask_version": if self.basic_mask { 1 } else { crate::rl::action::MASK_VERSION },
+            "mask_version": self.mask_version,
         }));
         decode_usi(pick, view.your_color)
     }
@@ -155,7 +161,7 @@ impl Strategy for RlPolicy {
     fn name(&self) -> &'static str {
         if self.greedy {
             self.names.1
-        } else if self.basic_mask {
+        } else if self.mask_version == 1 {
             self.names.2
         } else {
             self.names.0

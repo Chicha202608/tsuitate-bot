@@ -28,6 +28,12 @@ use crate::shogi::{Position, ShogiMove};
 ///    玉がそのマスにいたことになる。両方の場合の候補の和で絞る
 ///
 /// 元の版（`crate::deduce::KingCandidates`）は凍結版のエンコーダ（確定事実の `D_KING`）が共有しているので変えない
+///
+/// **前提: `log` は着手とその王手宣言の組の途中で切れていないこと。** 末尾の自分の手の後に `Check` が無ければ
+/// 「王手をかけなかった」と読み、確実な利きのあるマスを落とす。審判（`referee` / GUI の `play.rs` /
+/// `scenario_core::replay`）は着手と王手宣言を続けて記録するので、記録の後に呼ぶ限り満たされる。本番の
+/// `client.rs` は受理と王手宣言が別メッセージで届くので、その間に呼ぶと王手をかけた手で真の玉を落としうる
+/// （元の版も同じ）。手番の頭（相手の手が届いた後）に呼ぶこと
 pub fn opp_king_candidates_tight(my_color: Color, log: &ObservationLog) -> std::collections::BTreeSet<Coord> {
     let mut king = KingCandidatesTight::new(my_color);
     king.advance(log);

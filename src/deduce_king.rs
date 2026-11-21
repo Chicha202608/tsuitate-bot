@@ -792,4 +792,220 @@ mod tests {
         // 反則が無かったときと同じ候補になる（反則から何も推論しない）
         assert_eq!(tight, opp_king_candidates_tight(Color::Sente, &build(false)));
     }
+
+    /// 規則 3 で居場所が分かった相手の駒（テスト側が真実から追う。数えるだけで、判定は本体に任せる）
+    struct Tracked {
+        sq: Coord,
+        /// 分かった時点でそのマスにいたのが玉
+        was_king: bool,
+        /// 分かった時点までの相手の着手数
+        opp_moves_at: u32,
+    }
+
+    /// **健全性（ランダム対局）**: 審判に流したランダム対局の全試行の後で、両視点とも真の玉を落とさず、元の版
+    /// より広くならない。人工の入力では試していない次の場面が実際に起きたことも数えて確かめる:
+    ///
+    /// - 規則 3 で居場所が分かった駒が玉だった（玉が取った・打ちの反則の打ち先が玉）うえで、そのマスが後で空と分かった
+    /// - 居場所が分かってから空と分かるまでに、相手の手が2手以上挟まった
+    /// - 玉が駒を取った手が開き王手にもなった（規則 1 と規則 2 が同じ手に掛かる）
+    /// - 持っていない駒を打って反則した（規則 3 の証拠にしてはいけない）
+    ///
+    /// 局数と seed は env で増やせる:
+    /// `DEDUCE_KING_FUZZ_GAMES=5000 DEDUCE_KING_FUZZ_SEED=1 cargo test --release --lib ランダム対局で締めた`
+    #[test]
+    fn ランダム対局で締めた敵玉候補は真実を落とさない() {
+        use crate::deduce::{ImmobilePawns, KingCandidates};
+        use crate::referee::{Referee, StepResult};
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+
+        let games: u32 = std::env::var("DEDUCE_KING_FUZZ_GAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(150);
+        let seed: u64 = std::env::var("DEDUCE_KING_FUZZ_SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20261122);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let colors = [Color::Sente, Color::Gote];
+        let drop_roles = [Role::Lance, Role::Knight, Role::Silver, Role::Gold, Role::Bishop, Role::Rook];
+        let (mut checked, mut narrower) = (0usize, 0usize);
+        let (mut king_known_resolved, mut multi_resolved, mut king_capture_check, mut no_hand_fouls) = (0, 0, 0, 0);
+
+        for game in 0..games {
+            let mut referee = Referee::new();
+            let mut tight = colors.map(KingCandidatesTight::new);
+            let mut old = colors.map(KingCandidates::new);
+            let mut locked = colors.map(ImmobilePawns::new);
+            let mut tracked: [Vec<Tracked>; 2] = [vec![], vec![]];
+            let mut opp_moves = [0u32; 2];
+            let mut step_no = 0u32;
+            while referee.ended().is_none() {
+                let side = referee.to_move();
+                let s = side_idx(side);
+                let pos = referee.position().clone();
+                let legal = pos.legal_moves();
+                let gives_check = |mv: &ShogiMove| {
+                    let mut p = pos.clone();
+                    p.play_unchecked(mv);
+                    p.in_check(p.turn())
+                };
+                let is_capture = |mv: &ShogiMove| match mv {
+                    ShogiMove::Board { to, .. } => pos.piece_at(*to).is_some(),
+                    ShogiMove::Drop { .. } => false,
+                };
+                let is_king = |mv: &ShogiMove| match mv {
+                    ShogiMove::Board { from, .. } => pos.piece_at(*from).is_some_and(|p| p.role == Role::King),
+                    ShogiMove::Drop { .. } => false,
+                };
+                let pick = |v: Vec<&ShogiMove>, rng: &mut StdRng| {
+                    (!v.is_empty()).then(|| v[rng.random_range(0..v.len())].to_usi())
+                };
+                let empty_or_theirs: Vec<Coord> = all_squares()
+                    .into_iter()
+                    .filter(|&c| pos.piece_at(c).is_none_or(|p| p.color != side))
+                    .collect();
+                let random_drop = |role: Role, rng: &mut StdRng| {
+                    let to = empty_or_theirs[rng.random_range(0..empty_or_theirs.len())];
+                    crate::board::make_usi_drop(role, to)
+                };
+                let held: Vec<Role> = drop_roles.iter().copied().filter(|&r| pos.hand_count(side, r) > 0).collect();
+                let not_held: Vec<Role> = drop_roles.iter().copied().filter(|&r| pos.hand_count(side, r) == 0).collect();
+                let r: f64 = rng.random();
+                let usi = if r < 0.03 && !not_held.is_empty() {
+                    // 持っていない駒の打ち（必ず反則）
+                    random_drop(not_held[rng.random_range(0..not_held.len())], &mut rng)
+                } else if r < 0.15 && !held.is_empty() {
+                    // 持っている駒を、相手の駒がいるかもしれないマスへ打つ（規則 3 の証拠が立つ）
+                    random_drop(held[rng.random_range(0..held.len())], &mut rng)
+                } else {
+                    None
+                };
+                let usi = usi
+                    .or_else(|| {
+                        let kcc: Vec<&ShogiMove> =
+                            legal.iter().filter(|m| is_king(m) && is_capture(m) && gives_check(m)).collect();
+                        pick(kcc, &mut rng)
+                    })
+                    .or_else(|| {
+                        if rng.random_bool(0.3) {
+                            pick(legal.iter().filter(|m| gives_check(m)).collect(), &mut rng)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        if rng.random_bool(0.3) {
+                            pick(legal.iter().filter(|m| is_capture(m)).collect(), &mut rng)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| pick(legal.iter().collect(), &mut rng));
+                let Some(usi) = usi else { break };
+
+                // 真実から、規則 3 の証拠と場面を数える（観測者 = 指した側 s / 相手側 o）
+                let o = side_idx(side.other());
+                let mv = crate::shogi::parse_usi(&usi).expect("usi");
+                let was_in_check = pos.in_check(side);
+                let result = referee.step(&usi, 0);
+                let accepted = match result {
+                    StepResult::Accepted => true,
+                    StepResult::Foul => false,
+                    StepResult::Ended { move_accepted, .. } => move_accepted,
+                };
+                match (&mv, accepted) {
+                    (ShogiMove::Drop { role, to }, false) => {
+                        if pos.hand_count(side, *role) == 0 {
+                            no_hand_fouls += 1;
+                        } else if *role != Role::Pawn
+                            && !was_in_check
+                            && !crate::board::dead_end_rank(*role, to.rank, side)
+                        {
+                            let p = pos.piece_at(*to).expect("持ち駒の打ちの反則は相手の駒のマス");
+                            assert_ne!(p.color, side);
+                            tracked[s].retain(|t| t.sq != *to);
+                            tracked[s].push(Tracked {
+                                sq: *to,
+                                was_king: p.role == Role::King,
+                                opp_moves_at: opp_moves[s],
+                            });
+                        }
+                    }
+                    (_, true) => {
+                        opp_moves[o] += 1;
+                        let (to, from) = match mv {
+                            ShogiMove::Board { from, to, .. } => (to, Some(from)),
+                            ShogiMove::Drop { to, .. } => (to, None),
+                        };
+                        let captured = is_capture(&mv);
+                        if is_king(&mv) && captured && referee.position().in_check(side.other()) {
+                            king_capture_check += 1;
+                        }
+                        // 指した側: 着地・通り抜けで空と分かった
+                        tracked[s].retain(|t| {
+                            let landed = t.sq == to;
+                            if !(landed || from.is_some_and(|f| between(f, to, t.sq))) {
+                                return true;
+                            }
+                            if !(landed && captured) {
+                                king_known_resolved += t.was_king as usize;
+                                multi_resolved += (opp_moves[s] - t.opp_moves_at >= 2) as usize;
+                            }
+                            false
+                        });
+                        // 相手側: 取った駒は取ったマスにいる
+                        if captured {
+                            tracked[o].retain(|t| t.sq != to);
+                            tracked[o].push(Tracked {
+                                sq: to,
+                                was_king: is_king(&mv),
+                                opp_moves_at: opp_moves[o],
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+
+                step_no += 1;
+                for me in colors {
+                    let i = side_idx(me);
+                    let log = referee.log(me);
+                    tight[i].advance(log);
+                    old[i].advance(log);
+                    locked[i].advance(log);
+                    let lk = locked[i].result();
+                    let t = tight[i].candidates(log, &lk);
+                    let ol = old[i].candidates(log, &lk);
+                    let truth = referee.position().king_square(me.other()).expect("玉");
+                    assert!(
+                        t.contains(&truth),
+                        "seed={seed} 局{game} 試行{step_no} {me:?}視点: 真の玉 {} が候補{}件に無い（直前 {usi}）",
+                        make_usi_square(truth),
+                        t.len()
+                    );
+                    assert!(t.is_subset(&ol), "seed={seed} 局{game} 試行{step_no} {me:?}視点: 元の版より広い");
+                    narrower += (t.len() < ol.len()) as usize;
+                    checked += 1;
+                    if step_no % 16 == 0 {
+                        assert_eq!(
+                            opp_king_candidates_tight(me, log),
+                            t,
+                            "seed={seed} 局{game} 試行{step_no} {me:?}視点: 続きだけ食わせた結果"
+                        );
+                    }
+                }
+            }
+        }
+        println!(
+            "検査 {checked} / 元の版より絞れた {narrower} / 居場所が分かった玉が去った {king_known_resolved} / \
+             2手以上挟んで空と分かった {multi_resolved} / 玉が取って開き王手 {king_capture_check} / \
+             持っていない駒の打ちの反則 {no_hand_fouls}"
+        );
+        assert!(narrower > checked / 10, "絞れた局面が少なすぎる: {narrower}/{checked}");
+        assert!(king_known_resolved > 0, "居場所が分かった駒が玉だった場面が無い");
+        assert!(multi_resolved > 0, "2手以上挟んだ場面が無い");
+        assert!(king_capture_check > 0, "玉が取って開き王手の場面が無い");
+        assert!(no_hand_fouls > 0, "持っていない駒の打ちの反則が無い");
+    }
 }

@@ -288,10 +288,14 @@ impl KingCandidatesTight {
                     return;
                 }
                 // 王手を受けていない手番の、歩以外の打ちの反則: 打ち先に相手の駒がいる（二歩・打ち歩詰めは歩だけ。
-                // 行き所のないマスと自駒のマスは念のため除く）
+                // 行き所のないマスと自駒のマスは念のため除く）。持っていない駒の打ちは空きマスでも反則になるので、
+                // その駒種を持っていたときに限る（反則は持ち駒を変えないので、いまの持ち駒が打った時点の持ち駒）
                 let Some(ShogiMove::Drop { role, to }) = crate::shogi::parse_usi(usi) else {
                     return;
                 };
+                if self.model.my_hand().get(&role).copied().unwrap_or(0) == 0 {
+                    return;
+                }
                 // 自分から見た段（1 が一番奥）
                 let far = if my_color == Color::Sente { to.rank } else { 10 - to.rank };
                 let dead_end = match role {
@@ -719,30 +723,67 @@ mod tests {
         };
         log.record(mine(1, "7g7f"));
         log.record(theirs(2));
-        // 王手を受けていない手番の金打ちが反則 = 3c に相手の駒がいる（玉の候補のマスではないので玉ではない）
-        log.record(Observation::MyFoul {
-            move_number: 3,
-            usi: "G*3c".to_string(),
-        });
-        log.record(mine(3, "2g2f"));
-        log.record(theirs(4));
-        let before = opp_king_candidates_tight(Color::Sente, &log);
-        assert_eq!(before.len(), 15, "相手の2手ぶん（3〜7筋の a〜c 段）");
-        // 角が 3c を通り抜けて 2b の駒を取れた = 3c の駒は相手の直前の1手で動いていた。その1手は玉の手では
-        // ないので、玉は1手ぶんの6マスのまま
+        // 角を取って持ち駒にする（打ちの反則を「駒がいる」証拠にするには、その駒を持っている必要がある）
         log.record(Observation::MyMove {
-            move_number: 5,
+            move_number: 3,
             usi: "8h2b+".to_string(),
             captured: Some(Role::Bishop),
         });
+        log.record(theirs(4));
+        // 王手を受けていない手番の角打ちが反則 = 3c に相手の駒がいる
+        log.record(Observation::MyFoul {
+            move_number: 5,
+            usi: "B*3c".to_string(),
+        });
+        log.record(mine(5, "2g2f"));
+        log.record(theirs(6));
+        let before = opp_king_candidates_tight(Color::Sente, &log);
+        // 馬の隣（3a・3b・3c）を除いた相手の2手ぶんから、もう1手広げたもの
+        assert!(before.len() > 12, "まだ絞れていない: {}件", before.len());
+        // 馬が 3c を通り抜けて 4d に着地できた = 3c の駒は相手の直前の1手で動いていた。その1手は玉の手では
+        // ないので、玉は1手前（2g2f の後）の候補のまま。そこから 4d の馬の隣（4c・5c）が消える
+        log.record(mine(7, "2b4d"));
+        let tight = opp_king_candidates_tight(Color::Sente, &log);
         assert_eq!(
-            opp_king_candidates_tight(Color::Sente, &log),
-            set(&["4a", "4b", "5a", "5b", "6a", "6b"])
+            tight,
+            set(&["4a", "4b", "5a", "5b", "6a", "6b", "6c", "7a", "7b", "7c"])
         );
-        assert_eq!(
-            opp_king_candidates(Color::Sente, &log).len(),
-            12,
-            "元の版は2手ぶんから馬の隣（3a・3b・3c）を除くだけ"
-        );
+        let old = opp_king_candidates(Color::Sente, &log);
+        assert!(tight.is_subset(&old) && tight.len() < old.len(), "元の版より絞れる: {}件", old.len());
+    }
+
+    /// 規則 3 の健全性: 持っていない駒の打ちは空きマスでも反則になるので、「駒がいる」証拠にしない。
+    /// 証拠にすると、後でそのマスへ進めたときに玉が動いていないことにされ、真の玉（3b）を落とす（codex の反例）
+    #[test]
+    fn 持っていない駒の打ちの反則は駒がいる証拠にしない() {
+        let mine = |n: u32, usi: &str| Observation::MyMove {
+            move_number: n,
+            usi: usi.to_string(),
+            captured: None,
+        };
+        let theirs = |n: u32| Observation::OpponentMoved {
+            move_number: n,
+            captured_my_piece_at: None,
+        };
+        // ▲2六歩 △4一玉 ▲2五金打（金を持っていない反則）▲7六歩 △3二玉 ▲2五歩
+        let build = |with_foul: bool| {
+            let mut log = ObservationLog::default();
+            log.record(mine(1, "2g2f"));
+            log.record(theirs(2));
+            if with_foul {
+                log.record(Observation::MyFoul {
+                    move_number: 3,
+                    usi: "G*2e".to_string(),
+                });
+            }
+            log.record(mine(3, "7g7f"));
+            log.record(theirs(4));
+            log.record(mine(5, "2f2e"));
+            log
+        };
+        let tight = opp_king_candidates_tight(Color::Sente, &build(true));
+        assert!(tight.contains(&sq("3b")), "真の玉 3b が候補{}件に無い", tight.len());
+        // 反則が無かったときと同じ候補になる（反則から何も推論しない）
+        assert_eq!(tight, opp_king_candidates_tight(Color::Sente, &build(false)));
     }
 }

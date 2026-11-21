@@ -19,7 +19,7 @@ use crate::selfplay::{MAX_FOULS, MAX_PLIES};
 use crate::shogi::{HAND_ROLES, Position, ShogiMove, hand_index, parse_usi, unpromote_role};
 
 /// 自駒の駒種（`Role` の宣言順）
-const ROLES: [Role; 14] = [
+pub(crate) const ROLES: [Role; 14] = [
     Role::Pawn,
     Role::Lance,
     Role::Knight,
@@ -40,43 +40,43 @@ pub const HISTORY_MOVES: usize = 8;
 /// 鮮度の減衰（1手 = 1 move_number あたり）
 const DECAY: f32 = 0.95;
 /// 各駒種の総数（両者合計。`HAND_ROLES` 順）。相手の保有数の算出と正規化に使う
-const ROLE_TOTAL: [u32; 7] = [18, 4, 4, 4, 4, 2, 2];
+pub(crate) const ROLE_TOTAL: [u32; 7] = [18, 4, 4, 4, 4, 2, 2];
 
 // プレーンの配置
-const P_OWN: usize = 0; // 14
-const P_HIST: usize = P_OWN + 14; // 2 × HISTORY_MOVES（移動元, 移動先）
-const P_CAP: usize = P_HIST + 2 * HISTORY_MOVES; // 取ったマスの鮮度
-const P_CAP_ROLE: usize = P_CAP + 1; // 7: 取った駒種ごとの鮮度
-const P_LOST: usize = P_CAP_ROLE + 7; // 取られたマスの鮮度
-const P_LOST_COUNT: usize = P_LOST + 1; // 取られた回数
+pub(crate) const P_OWN: usize = 0; // 14
+pub(crate) const P_HIST: usize = P_OWN + 14; // 2 × HISTORY_MOVES（移動元, 移動先）
+pub(crate) const P_CAP: usize = P_HIST + 2 * HISTORY_MOVES; // 取ったマスの鮮度
+pub(crate) const P_CAP_ROLE: usize = P_CAP + 1; // 7: 取った駒種ごとの鮮度
+pub(crate) const P_LOST: usize = P_CAP_ROLE + 7; // 取られたマスの鮮度
+pub(crate) const P_LOST_COUNT: usize = P_LOST + 1; // 取られた回数
 // 反則は「今の手番」と「過去の手番」を同じ形で持つ（1組 = 移動元・移動先・成りの移動先・
 // 打ち先×駒種7）。打ちの駒種と成りを分けるのは、同じマスでも反則の原因（打ち歩詰め・
 // 成れない位置など）が違い、隠れた盤面への証拠が別物になるため
-const FOUL_GROUP: usize = 3 + 7;
-const P_FOUL: usize = P_LOST_COUNT + 1; // 今の手番の反則（値は 1）
-const P_PAST_FOUL: usize = P_FOUL + FOUL_GROUP; // 過去の手番の反則（値は鮮度）
-const F_FROM: usize = 0;
-const F_TO: usize = 1;
-const F_PROMO_TO: usize = 2;
-const F_DROP: usize = 3;
-const P_CHECKED_KING: usize = P_PAST_FOUL + FOUL_GROUP; // 王手されたときの自玉の位置（鮮度）
-const P_GAVE_CHECK: usize = P_CHECKED_KING + 1; // 王手をかけた手の移動先（鮮度）
-const P_UNMOVED: usize = P_GAVE_CHECK + 1; // 初期配置から一度も動いていない自駒
-const P_HAND: usize = P_UNMOVED + 1; // 7: 自分の持ち駒（全面に放送）
-const P_OPP_HOLD: usize = P_HAND + 7; // 7: 相手の駒種別保有数（盤上＋持ち駒。自分側から確定）
-const P_SCALAR: usize = P_OPP_HOLD + 7; // 以下のスカラー
-const S_MY_FOULS: usize = 0;
-const S_OPP_FOULS: usize = 1;
-const S_MY_LAST_FOUL: usize = 2; // あと1回で反則負け
-const S_OPP_LAST_FOUL: usize = 3;
-const S_FOULS_THIS_TURN: usize = 4;
-const S_IN_CHECK: usize = 5;
-const S_GAVE_CHECK_LAST: usize = 6; // 直前の自分の手で王手をかけた
-const S_MOVE_NUMBER: usize = 7;
+pub(crate) const FOUL_GROUP: usize = 3 + 7;
+pub(crate) const P_FOUL: usize = P_LOST_COUNT + 1; // 今の手番の反則（値は 1）
+pub(crate) const P_PAST_FOUL: usize = P_FOUL + FOUL_GROUP; // 過去の手番の反則（値は鮮度）
+pub(crate) const F_FROM: usize = 0;
+pub(crate) const F_TO: usize = 1;
+pub(crate) const F_PROMO_TO: usize = 2;
+pub(crate) const F_DROP: usize = 3;
+pub(crate) const P_CHECKED_KING: usize = P_PAST_FOUL + FOUL_GROUP; // 王手されたときの自玉の位置（鮮度）
+pub(crate) const P_GAVE_CHECK: usize = P_CHECKED_KING + 1; // 王手をかけた手の移動先（鮮度）
+pub(crate) const P_UNMOVED: usize = P_GAVE_CHECK + 1; // 初期配置から一度も動いていない自駒
+pub(crate) const P_HAND: usize = P_UNMOVED + 1; // 7: 自分の持ち駒（全面に放送）
+pub(crate) const P_OPP_HOLD: usize = P_HAND + 7; // 7: 相手の駒種別保有数（盤上＋持ち駒。自分側から確定）
+pub(crate) const P_SCALAR: usize = P_OPP_HOLD + 7; // 以下のスカラー
+pub(crate) const S_MY_FOULS: usize = 0;
+pub(crate) const S_OPP_FOULS: usize = 1;
+pub(crate) const S_MY_LAST_FOUL: usize = 2; // あと1回で反則負け
+pub(crate) const S_OPP_LAST_FOUL: usize = 3;
+pub(crate) const S_FOULS_THIS_TURN: usize = 4;
+pub(crate) const S_IN_CHECK: usize = 5;
+pub(crate) const S_GAVE_CHECK_LAST: usize = 6; // 直前の自分の手で王手をかけた
+pub(crate) const S_MOVE_NUMBER: usize = 7;
 /// 観測ログから再構成した自駒・持ち駒が視界と食い違う（再起動で履歴を失った等）。
 /// 履歴由来の特徴（鮮度・未着手駒・王手履歴）が信用できないことをネットへ知らせる
-const S_HISTORY_BROKEN: usize = 8;
-const NUM_SCALARS: usize = 9;
+pub(crate) const S_HISTORY_BROKEN: usize = 8;
+pub(crate) const NUM_SCALARS: usize = 9;
 
 pub const NUM_PLANES: usize = P_SCALAR + NUM_SCALARS;
 pub const OBS_LEN: usize = NUM_PLANES * 81;
@@ -84,11 +84,11 @@ pub const OBS_LEN: usize = NUM_PLANES * 81;
 // 確定事実のプレーン（エンコーダ v2、2026-10-16。docs/rl-deepnash-design.md の改善案2）。
 // v1（`NUM_PLANES`）の後ろに足すだけなので、v1 の重みの stem に 0 の列を足せば同じ関数から始められる。
 // どれも観測から論理的に確定する事実（真の盤面と矛盾しない）で、`action::deduced_facts` と `deduce` が作る
-const D_OCC: usize = NUM_PLANES; // 相手の駒がいると確定したマス
-const D_BLOCK: usize = D_OCC + 1; // 飛び越え反則の間のマス（どれかに相手の駒がいる。値は 1/マス数）
-const D_CHECKER: usize = D_BLOCK + 1; // 王手中: 王手駒がいうるマス（値は 1/仮説数）
-const D_KING: usize = D_CHECKER + 1; // 相手玉がいうるマス（deduce::opp_king_candidates）
-const D_PAWN: usize = D_KING + 1; // 動けないと確定した相手の歩（deduce::immobile_opponent_pawns）
+pub(crate) const D_OCC: usize = NUM_PLANES; // 相手の駒がいると確定したマス
+pub(crate) const D_BLOCK: usize = D_OCC + 1; // 飛び越え反則の間のマス（どれかに相手の駒がいる。値は 1/マス数）
+pub(crate) const D_CHECKER: usize = D_BLOCK + 1; // 王手中: 王手駒がいうるマス（値は 1/仮説数）
+pub(crate) const D_KING: usize = D_CHECKER + 1; // 相手玉がいうるマス（deduce::opp_king_candidates）
+pub(crate) const D_PAWN: usize = D_KING + 1; // 動けないと確定した相手の歩（deduce::immobile_opponent_pawns）
 /// エンコーダ v2 のプレーン数（v1 + 確定事実 5枚）
 pub const NUM_PLANES_DEDUCED: usize = D_PAWN + 1;
 
@@ -96,17 +96,17 @@ pub const NUM_PLANES_DEDUCED: usize = D_PAWN + 1;
 // 情報だけで決まる事実を2組足す。**並びは固定**で、学習でどの組を使うかはネットの側が持つ（tsuitate-nn の
 // `--opp-hand-planes` / `--opp-foul-planes`。使わない組は stem の重みの列が 0 に固定されるので、ここで書いた値は
 // 出力に効かない）。並びを固定にしておくと、組の選び方が違うネットどうし（錨・リーグ）が同じ観測を読める
-const E_HAND: usize = NUM_PLANES_DEDUCED; // 7: 相手の持ち駒の上界（駒種別。全面に放送）
-const E_FOUL: usize = E_HAND + 7; // 3: 相手の反則の時系列（全面に放送）
-const EF_LAST: usize = 0; // 相手の直前の手番の反則数
-const EF_CHECKED: usize = 1; // 王手を受けていた相手の手番の反則数（鮮度つきの合計）
-const EF_FREE: usize = 2; // 王手を受けていない相手の手番の反則数（鮮度つきの合計）
+pub(crate) const E_HAND: usize = NUM_PLANES_DEDUCED; // 7: 相手の持ち駒の上界（駒種別。全面に放送）
+pub(crate) const E_FOUL: usize = E_HAND + 7; // 3: 相手の反則の時系列（全面に放送）
+pub(crate) const EF_LAST: usize = 0; // 相手の直前の手番の反則数
+pub(crate) const EF_CHECKED: usize = 1; // 王手を受けていた相手の手番の反則数（鮮度つきの合計）
+pub(crate) const EF_FREE: usize = 2; // 王手を受けていない相手の手番の反則数（鮮度つきの合計）
 /// エンコーダ v3 のプレーン数（v2 + 相手の持ち駒の上界 7枚 + 相手の反則の時系列 3枚）
 pub const NUM_PLANES_V3: usize = E_FOUL + 3;
 // エンコーダ v4（2026-11-08。設計 doc の「エンコーダ v3」の節の v4）。v3 の後ろに1枚足すだけなので、v3 の重みは
 // v4 の観測の先頭を読めばよい（v3 の実験の checkpoint をそのまま使える）。組の扱いは v3 と同じ（tsuitate-nn の
 // `--king-foul-planes`）
-const E_KING_FOUL: usize = NUM_PLANES_V3; // 1: 自玉の移動で反則したマス（鮮度は反則した手数から）
+pub(crate) const E_KING_FOUL: usize = NUM_PLANES_V3; // 1: 自玉の移動で反則したマス（鮮度は反則した手数から）
 /// エンコーダ v4 のプレーン数（v3 + 玉の移動で反則したマス 1枚）
 pub const NUM_PLANES_V4: usize = E_KING_FOUL + 1;
 // エンコーダ v5（2026-11-17。設計 doc の「エンコーダ v3」の節の v5）。v4 の後ろに「取った駒・取られた駒の一覧」を4組。
@@ -114,10 +114,10 @@ pub const NUM_PLANES_V4: usize = E_KING_FOUL + 1;
 // 駒種が無い（`P_LOST`）。ここでは薄れない回数と、取られた駒種・歩の切れた筋を持つ。組の扱いは v3 / v4 と同じ
 // （並びは固定で、使う組はネットが選ぶ。tsuitate-nn の `--lost-fresh-planes` / `--lost-role-planes` /
 // `--cap-role-planes` / `--pawn-file-planes`）
-const E_LOST_FRESH: usize = NUM_PLANES_V4; // 7: 取られた駒種ごとの、最後に取られた手数からの鮮度（全面に放送）
-const E_LOST_ROLE: usize = E_LOST_FRESH + 7; // 7: 取られた駒種ごとのマス（回数。薄れない）
-const E_CAP_ROLE: usize = E_LOST_ROLE + 7; // 7: 取った駒種ごとのマス（回数。薄れない）
-const E_PAWN_FILE: usize = E_CAP_ROLE + 7; // 1: 相手の歩を取った筋（筋の全マスに回数。薄れない）
+pub(crate) const E_LOST_FRESH: usize = NUM_PLANES_V4; // 7: 取られた駒種ごとの、最後に取られた手数からの鮮度（全面に放送）
+pub(crate) const E_LOST_ROLE: usize = E_LOST_FRESH + 7; // 7: 取られた駒種ごとのマス（回数。薄れない）
+pub(crate) const E_CAP_ROLE: usize = E_LOST_ROLE + 7; // 7: 取った駒種ごとのマス（回数。薄れない）
+pub(crate) const E_PAWN_FILE: usize = E_CAP_ROLE + 7; // 1: 相手の歩を取った筋（筋の全マスに回数。薄れない）
 /// 回数のプレーンの1回ぶん（3回で 1 に張り付く。`P_LOST_COUNT` と同じ）
 const COUNT_STEP: f32 = 1.0 / 3.0;
 /// エンコーダ v5 のプレーン数（v4 + 取られた駒種の鮮度 7枚 + 取られた駒種のマス 7枚 + 取った駒種のマス 7枚 + 歩を取った筋 1枚）

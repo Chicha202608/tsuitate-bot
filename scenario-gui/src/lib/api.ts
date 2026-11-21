@@ -182,6 +182,35 @@ export interface PlayView {
   capturedSquare: string | null;
 }
 
+/** 入力プレーン1枚（方策ネットのエンコーダが書いた値そのまま） */
+export interface PlaneView {
+  /** プレーン番号（0 始まり）。入力には無い参考の1枚は null */
+  index: number | null;
+  group: string;
+  label: string;
+  /** 足したエンコーダの版（"v1"〜"v5"。参考の1枚は "参考"） */
+  version: string;
+  /** 全面に同じ値を入れるプレーンなら、その値 */
+  scalar: number | null;
+  /** 値の読み方（「3枚」「2回」など） */
+  note: string | null;
+  /** マスごとの値（0 のマスは入っていない）。全面のプレーンでは空 */
+  cells: Record<string, number>;
+}
+
+export interface PlanesOut {
+  /** どちらの席の観測か */
+  side: Color;
+  moveNumber: number;
+  /** その席が手番か */
+  toMove: boolean;
+  planes: PlaneView[];
+}
+
+/** プレーンを選ぶときのキー（番号。参考の1枚は見出し） */
+export const planeKey = (p: PlaneView): string =>
+  p.index == null ? `extra:${p.label}` : String(p.index);
+
 export const listScenarios = () => invoke<ScenarioInfo[]>("list_scenarios");
 export const getEngines = () => invoke<string[]>("engines");
 export const loadKifu = (path: string) => invoke<KifuData>("load_kifu", { path });
@@ -236,3 +265,5 @@ export const playResign = () => invoke<PlayView>("play_resign");
 export const playView = () => invoke<PlayView>("play_view");
 export const playExport = (fileName: string, ply: number | null, desc: string | null) =>
   invoke<string>("play_export", { fileName, ply, desc });
+/** `side` の席の観測から作った入力プレーン（対局モード） */
+export const playPlanes = (side: Color) => invoke<PlanesOut>("play_planes", { side });

@@ -735,6 +735,7 @@ fn main() {
             play::play_bot_move,
             play::play_resign,
             play::play_view,
+            play::play_planes,
             play::play_export,
         ])
         .run(tauri::generate_context!())

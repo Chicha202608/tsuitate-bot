@@ -1,13 +1,17 @@
 <script lang="ts">
   import Board from "./Board.svelte";
+  import InputPlanes from "./InputPlanes.svelte";
   import {
+    planeKey,
     playBotMove,
     playExport,
     playHumanMove,
+    playPlanes,
     playResign,
     playStart,
     playStartBots,
     type Color,
+    type PlanesOut,
     type PlayView,
     type Role,
     type Snapshot,
@@ -65,6 +69,14 @@
   let promo = $state<{ from: string; to: string } | null>(null);
   let logBox = $state<HTMLDivElement | undefined>();
 
+  // 入力プレーン（方策ネットのエンコーダが、ある席の観測から作る入力）の表示
+  let sideTab = $state<"log" | "input">("log");
+  let inputSideChoice = $state<Color | null>(null); // null = 既定（下の inputSide）
+  let planes = $state<PlanesOut | null>(null);
+  let planesLoading = $state(false);
+  let selectedPlane = $state<string | null>(null); // 盤に重ねているプレーン
+  let planesReq = 0;
+
   // 書き出し
   let exportName = $state("");
   let exportPly = $state("");
@@ -113,6 +125,42 @@
   const boardFlipped = $derived(
     view?.humanColor == null ? watchFlipped : view.humanColor === "gote",
   );
+
+  // 入力を見る席。既定は対人なら人間の席、観戦なら盤の下側の席
+  const inputSide = $derived.by((): Color => {
+    if (inputSideChoice) return inputSideChoice;
+    if (view?.humanColor) return view.humanColor;
+    return watchFlipped ? "gote" : "sente";
+  });
+  const inputSides = $derived.by((): [Color, string][] =>
+    view ? [["sente", sideLabel(view, "sente")], ["gote", sideLabel(view, "gote")]] : [],
+  );
+  // 盤に重ねる値（選んだプレーンのマスごとの値）
+  const planeOverlay = $derived.by((): Record<string, number> | null => {
+    if (sideTab !== "input" || !selectedPlane || !planes) return null;
+    const p = planes.planes.find((x) => planeKey(x) === selectedPlane);
+    return p && p.scalar == null && Object.keys(p.cells).length > 0 ? p.cells : null;
+  });
+
+  // 局面が進むたび・席を替えるたびに入力を取り直す（タブを開いている間だけ）。
+  // bot の思考中はセッションが塞がっているので、結果は思考が終わってから届く
+  $effect(() => {
+    const v = view;
+    const side = inputSide;
+    if (sideTab !== "input" || !v) return;
+    const req = ++planesReq;
+    planesLoading = true;
+    playPlanes(side)
+      .then((p) => {
+        if (req === planesReq) planes = p;
+      })
+      .catch((e) => {
+        if (req === planesReq) error = String(e);
+      })
+      .finally(() => {
+        if (req === planesReq) planesLoading = false;
+      });
+  });
 
   const targets = $derived.by((): string[] => {
     if (!view || !humanTurn || !selected) return [];
@@ -176,6 +224,9 @@
     reveal = false;
     auto = false;
     exportPly = "";
+    planes = null;
+    selectedPlane = null;
+    inputSideChoice = null;
   }
 
   async function start() {
@@ -440,6 +491,7 @@
           handSide={humanTurn ? view.humanColor : null}
           selectedHandRole={selected?.kind === "hand" ? selected.role : null}
           onHandClick={handClick}
+          overlay={planeOverlay}
         />
         {#if promo}
           <div class="promo">
@@ -497,6 +549,27 @@
       </section>
 
       <section class="side-col">
+        <div class="sub-nav side-tabs">
+          <button class:active={sideTab === "log"} onclick={() => (sideTab = "log")}>
+            観測イベント・書き出し
+          </button>
+          <button class:active={sideTab === "input"} onclick={() => (sideTab = "input")}>
+            入力プレーン
+          </button>
+        </div>
+        {#if sideTab === "input"}
+          <InputPlanes
+            {planes}
+            sides={inputSides}
+            side={inputSide}
+            onSide={(c) => (inputSideChoice = c)}
+            flipped={boardFlipped}
+            selected={selectedPlane}
+            onSelect={(k) => (selectedPlane = k)}
+            loading={planesLoading}
+            hiddenInfo={view.humanColor != null && !showTruth && inputSide !== view.humanColor}
+          />
+        {:else}
         <div class="log-head">観測イベント</div>
         <div class="log" bind:this={logBox}>
           {#each log as line, i (i)}
@@ -531,6 +604,7 @@
             <div class="exported">保存済み: {exportedPath}</div>
           {/if}
         </div>
+        {/if}
       </section>
     </div>
   {:else}
@@ -614,6 +688,10 @@
     gap: 8px;
     min-height: 0;
     min-width: 0;
+  }
+
+  .side-tabs {
+    width: fit-content;
   }
 
   .promo {

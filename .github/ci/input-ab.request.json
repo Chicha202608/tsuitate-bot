@@ -1,0 +1,13 @@
+{
+  "_note": "流れの確認用の小さい設定（数分で終わる）。3段のうち 1段目は途中で止まり、2段目が続きを回し、3段目は何もしないはず",
+  "arms": "v4 v5",
+  "seeds": 2,
+  "steps": 40,
+  "stages": 3,
+  "stage_minutes": 4,
+  "export_every": 10,
+  "games": 10,
+  "horizons": 2,
+  "refs": "heuristic",
+  "nn_ref": "claude/zealous-heisenberg-ywm6ln"
+}

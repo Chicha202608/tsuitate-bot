@@ -1,13 +1,16 @@
 {
-  "_note": "流れの確認用の小さい設定（2回目。段ごとの artifact の受け渡しを変えた後の確認）。1段目は途中で止まり、2段目が続きを回すはず",
+  "_note": "較正の run（docs/rl-input-ab.md）: 本番の大きさで差が分かっている v4 対 v5 を、12本ずつ・最長 3段（2,400更新まで）で回す",
   "arms": "v4 v5",
-  "seeds": 2,
-  "steps": 30,
-  "stages": 2,
-  "stage_minutes": 3,
-  "export_every": 10,
-  "games": 10,
-  "horizons": 2,
-  "refs": "heuristic",
-  "nn_ref": "claude/zealous-heisenberg-ywm6ln"
+  "control": "v4",
+  "treat": "v5",
+  "seeds": 12,
+  "steps": 2400,
+  "stages": 3,
+  "stage_minutes": 290,
+  "export_every": 100,
+  "games": 100,
+  "horizons": 4,
+  "refs": "heuristic rl_v15",
+  "_nn_ref_note": "tsuitate-nn のブランチ claude/zealous-heisenberg-ywm6ln の先頭（rnad/input_ab.py を足したコミット）。途中でブランチが動いても後の段が同じコードで続くよう、コミットで指す",
+  "nn_ref": "18daba4025339f395f7b6e861bb30e82d14d565f"
 }

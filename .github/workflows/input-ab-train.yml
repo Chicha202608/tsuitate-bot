@@ -2,8 +2,8 @@ name: Input A/B train
 
 # input-ab.yml の学習の1段（呼び出し専用。単独では走らない）。
 # 1ランナー = 4本（1本 1スレッド）の小さい自己対局を stage_minutes 分まで回し、run の状態を丸ごと artifact
-# `iab-train-<シャード>` に置く。2段目以降は前の段の artifact を取ってきて checkpoint から続け、同じ名前で置き直す
-# （届いていれば何もしない）。学習側は tsuitate-nn の rnad/input_ab.py。
+# `iab-train-s<段>-<シャード>` に置く。2段目以降は前の段までの artifact を取ってきて、run ごとにいちばん進んだものの
+# checkpoint から続ける（届いていれば何もしない）。学習側は tsuitate-nn の rnad/input_ab.py。
 on:
   workflow_call:
     inputs:
@@ -60,14 +60,17 @@ jobs:
           repository: tempakyousuke/tsuitate-nn
           ref: ${{ inputs.nn_ref }}
           path: nn
-      - name: Previous stage
+      - name: Previous stages
         if: ${{ inputs.stage > 1 }}
         # 前の段がこのシャードを置けていなければ（ジョブごと落ちた）、最初から回す
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: iab-train-${{ matrix.shard.id }}
-          path: iab
+          pattern: iab-train-s*-${{ matrix.shard.id }}
+          path: parts
+      - name: Merge
+        # 前の段までの artifact から、run ごとにいちばん進んだものを続ける
+        run: python3 scripts/ci/input_ab.py merge parts iab
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -126,7 +129,6 @@ jobs:
         # 途中で落ちても、そこまでの状態を置く（次の段と集計が使う）
         if: ${{ always() && steps.pending.outputs.n != '0' }}
         with:
-          name: iab-train-${{ matrix.shard.id }}
+          name: iab-train-s${{ inputs.stage }}-${{ matrix.shard.id }}
           path: iab
-          overwrite: true
           if-no-files-found: error

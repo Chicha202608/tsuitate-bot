@@ -6,6 +6,8 @@
 
     # 起動の引数（手動起動の入力か、リクエストファイル）を解釈して、ランナーへの配り方を決める
     python3 scripts/ci/input_ab.py plan [--request .github/ci/input-ab.request.json]
+    # 学習の段ごとの artifact から、run ごとにいちばん進んだものを集める
+    python3 scripts/ci/input_ab.py merge parts iab
     # 全部の run に共通して書き出されている更新から、比べる時点を選ぶ（JSON の配列を出す）
     python3 scripts/ci/input_ab.py horizons <root> --count 4
     # ある更新の重みを総当たりにする（1対 --games 局。両側とも序盤は定跡から = 学習と同じ）
@@ -27,6 +29,7 @@ import os
 import pathlib
 import random
 import re
+import shutil
 import subprocess
 import sys
 
@@ -124,6 +127,48 @@ def runs_in(root: pathlib.Path):
         if d.is_dir() and sep and seed.isdigit():
             out.append((name, int(seed), d))
     return out
+
+
+def logged_step(run: pathlib.Path) -> int:
+    """log.jsonl の最後の更新の行の step（無ければ 0）"""
+    path = run / "log.jsonl"
+    step = 0
+    if path.exists():
+        for line in open(path):
+            try:
+                x = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "update_sec" in x and "step" in x:
+                step = x["step"]
+    return step
+
+
+def cmd_merge(args):
+    """学習の段ごとの artifact（`<src>/<artifact>/<腕>_s<seed>/`）から、run ごとにいちばん進んだものを `<dst>` へ集める。
+    段をまたいで同じ run が何度も置かれる（続きを回すたび）。前の段を取り損ねて最初から回し直した段があっても、
+    進んだほうを残す。同じ更新なら後の段"""
+    src, dst = pathlib.Path(args.src), pathlib.Path(args.dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    best = {}
+    # artifact が1つだけのときに、取ってくる側がサブディレクトリを作らない場合にも備える（src 自体を1つの artifact と見る）
+    parts = ([src] + sorted(src.iterdir())) if src.exists() else []
+    for part in parts:
+        if not part.is_dir():
+            continue
+        for _, _, d in runs_in(part):
+            key = (logged_step(d), part.name)
+            if d.name not in best or key > best[d.name][0]:
+                best[d.name] = (key, d)
+        if (part / "arms.json").exists():
+            shutil.copy(part / "arms.json", dst / "arms.json")
+    for name, ((step, part), d) in sorted(best.items()):
+        if (dst / name).exists():
+            raise SystemExit(f"{dst / name} が既にある")
+        shutil.move(str(d), str(dst / name))
+        print(f"{name}: {step} 更新（{part}）")
+    if not best:
+        print("前の段の run は無い")
 
 
 def exported_steps(run: pathlib.Path):
@@ -359,6 +404,10 @@ def main():
     pl = sub.add_parser("plan", help="起動の引数を解釈する")
     pl.add_argument("--request", default="", help="リクエストファイル（無ければ環境変数 IN_<キー> = 手動起動の入力）")
     pl.set_defaults(func=cmd_plan)
+    m = sub.add_parser("merge", help="学習の段ごとの artifact から、run ごとにいちばん進んだものを集める")
+    m.add_argument("src", help="artifact ごとのディレクトリが並ぶ場所")
+    m.add_argument("dst")
+    m.set_defaults(func=cmd_merge)
     h = sub.add_parser("horizons", help="比べる時点を選ぶ")
     h.add_argument("root")
     h.add_argument("--count", type=int, default=4)

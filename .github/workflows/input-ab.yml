@@ -174,9 +174,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
-          pattern: iab-train-*
-          path: iab
-          merge-multiple: true
+          pattern: iab-train-s*
+          path: parts
+      - name: Merge
+        run: python3 scripts/ci/input_ab.py merge parts iab
       - id: h
         env:
           COUNT: ${{ needs.plan.outputs.horizons }}
@@ -199,9 +200,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
-          pattern: iab-train-*
-          path: iab
-          merge-multiple: true
+          pattern: iab-train-s*
+          path: parts
+      - name: Merge
+        run: python3 scripts/ci/input_ab.py merge parts iab
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
@@ -236,9 +238,10 @@ jobs:
           path: nn
       - uses: actions/download-artifact@v4
         with:
-          pattern: iab-train-*
-          path: iab
-          merge-multiple: true
+          pattern: iab-train-s*
+          path: parts
+      - name: Merge
+        run: python3 scripts/ci/input_ab.py merge parts iab
       - uses: actions/download-artifact@v4
         with:
           pattern: iab-eval-*
@@ -282,7 +285,8 @@ jobs:
             echo "## 入力の A/B: 対局の結果が無い（学習が最初の書き出しまで進まなかったか、総当たりが落ちた）" > report/table.md
           fi
           { echo; echo "### 学習の進み（直近 50 更新の平均）"; echo; python nn/rnad/input_ab.py status iab; } >> report/table.md
-          cat report/table.md >> "$GITHUB_STEP_SUMMARY"
+          # ログにも出す（gh が無い環境からはジョブサマリーを読めない）
+          tee -a "$GITHUB_STEP_SUMMARY" < report/table.md
       - uses: actions/upload-artifact@v4
         with:
           name: input-ab-report

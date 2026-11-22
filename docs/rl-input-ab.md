@@ -52,7 +52,7 @@ gh workflow run input-ab.yml --ref <ブランチ> -f arms="v4 v5" -f control=v4 
 
 流れは plan → train1〜3（学習）→ horizons（比べる時点を選ぶ）→ crossplay（時点ごとに総当たり）→ report。
 結果はジョブサマリーと artifact `input-ab-report`（表・対局の集計・入力の読み方）、学習の状態は
-`iab-train-<シャード>`（重みと checkpoint とログ）。
+`iab-train-s<段>-<シャード>`（重みと checkpoint とログ。後の段ほど進んでいる）。
 
 リポジトリは公開なので Actions の分は無料。既定の設定で、学習が 4ランナー × 最長 約10時間、対局と集計が 1時間弱。
 

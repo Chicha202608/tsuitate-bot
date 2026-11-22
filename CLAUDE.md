@@ -18,6 +18,7 @@
 | MMD 学習器（Ataraxos 型、`--algo mmd`）の設計 | `docs/rl-mmd-design.md`（結果と A/B の手順は `docs/rl-learning-speed.md` 10節） |
 | 序盤が速攻1本に固まったことの計測と、学習の自己対局で序盤を定跡から指させる仕組み（`--open-book`） | `docs/rl-opening-diversity.md` |
 | 既存のモデルを相手にゼロから学習する実験（報酬の整形 `--shape`・負けるまでの長さ・ハンデつきの相手 `<名前>@<ε>`・局の信号）と、定跡に従う相手（`open:book:<名前>`）を搾取する搾取役の育て方 | `docs/rl-fixed-opponent.md` |
+| 入力プレーンの A/B を CI の CPU で回す（`input-ab.yml`。小さい自己対局を 腕 × seed で回して総当たり）と、その較正 | `docs/rl-input-ab.md` |
 
 ## コマンド
 

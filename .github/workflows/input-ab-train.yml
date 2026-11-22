@@ -132,3 +132,5 @@ jobs:
           name: iab-train-s${{ inputs.stage }}-${{ matrix.shard.id }}
           path: iab
           if-no-files-found: error
+          # 段ごとに run の状態を丸ごと置くので大きい（1本 数十MB × 段）。続きを回す・重みを取り出すのに十分な間だけ残す
+          retention-days: 30

@@ -356,14 +356,20 @@ def cmd_table(args):
                 cells.append(f"{sum(plies) / len(plies):.0f}" if plies else "–")
                 out.append(f"| {a} | " + " | ".join(cells) + " |")
             out.append("")
-        if args.treat in by_arm and args.control in by_arm:
-            xs, ys = by_arm[args.treat], by_arm[args.control]
+        # 判定の組（候補 対 対照）を先に、ほかの腕の組も同じ形で出す（腕が 3つ以上のとき。名前の後ろの腕が候補の側）
+        pairs = [(args.treat, args.control)] + [(b, a) for i, a in enumerate(arms) for b in arms[i + 1:]
+                                                if {a, b} != {args.treat, args.control}]
+        for x_arm, y_arm in pairs:
+            if x_arm not in by_arm or y_arm not in by_arm:
+                continue
+            xs, ys = by_arm[x_arm], by_arm[y_arm]
             m = cross_mean(t, xs, ys)
             lo, hi = bootstrap_ci(t, xs, ys, rng)
             p, d = permutation_p(t, xs, ys, rng)
-            out.append(f"**{args.treat} 対 {args.control}**: {pct(m)}（{pct(lo)}〜{pct(hi)}）。"
-                       f"名札の入れ替え検定（片側）p = {p:.3f}（ほかの全 run への平均勝率の差 {100 * d:+.1f}pt）\n")
-            verdict = (step, m, lo, hi, p, len(xs), len(ys))
+            out.append(f"**{x_arm} 対 {y_arm}**: {pct(m)}（{pct(lo)}〜{pct(hi)}）。"
+                       f"名札の入れ替え検定（片側）p = {p:.3f}（この 2つの腕の全 run への平均勝率の差 {100 * d:+.1f}pt）\n")
+            if (x_arm, y_arm) == (args.treat, args.control):
+                verdict = (step, m, lo, hi, p, len(xs), len(ys))
     head = ["## 入力の A/B（小さい自己対局）\n"]
     if verdict:
         step, m, lo, hi, p, nx, ny = verdict

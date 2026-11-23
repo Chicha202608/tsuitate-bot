@@ -962,7 +962,8 @@ mod tests {
         let mut fresh = vec![0.0; NUM_PLANES_V6 * 81];
         let mut cached = vec![0.0; NUM_PLANES_V6 * 81];
         let mut n = 0;
-        for game in 0..12 {
+        // 毎回たどり直す側は手数の2乗で重い（v6 は締めた相手玉の候補も最初からたどる）ので、局数は少なめ
+        for game in 0..5 {
             let mut referee = Referee::new();
             loop {
                 let side = referee.to_move();
@@ -986,6 +987,7 @@ mod tests {
                 }
             }
         }
+        println!("{n} 観測");
         assert!(n > 1000, "局面が少なすぎる: {n}");
     }
 

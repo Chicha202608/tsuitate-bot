@@ -230,20 +230,28 @@ fn history_consistent(model: &GameModel, view: &PlayerView) -> bool {
     a == b && hand_a == hand_b
 }
 
-/// 受理手（自分の着手・相手の着手）の手数が欠けずに並び、最後が今の手数 `now` と一致するか。手数は適用後の値
-/// （審判・サーバーの規約。初手の受理が 2）なので、受理手は 2, 3, 4, … と並び、最後の受理手の手数が今の手数になる
-/// （まだ誰も指していなければ今の手数は 1）
-fn moves_contiguous(log: &ObservationLog, now: u32) -> bool {
-    let mut last = 1u32;
+/// 受理手（自分の着手・相手の着手）が1つも欠けずに、今の手数 `now` まで並んでいるか。手数は初期局面で 1、受理の
+/// たびに +1 なので、欠けていなければ受理手の数は `now − 1`。受理手に付く手数は、記録する側で規約が2つある:
+/// 審判・サーバー（Socket.IO 版）は適用後の値（初手が 2、最後が `now`）、webhook のセッション
+/// （`webhook_session.rs`）は適用前の値（初手が 1、最後が `now − 1`）。どちらの規約でも、手数が 1 ずつ増えていて
+/// 数が合えば欠けていない（片方の規約だけを受け付けると、もう片方では常に欠けている扱いになる）
+pub(crate) fn moves_contiguous(log: &ObservationLog, now: u32) -> bool {
+    let mut prev: Option<u32> = None;
+    let mut count = 0u32;
     for event in log.events() {
         if let Observation::MyMove { move_number, .. } | Observation::OpponentMoved { move_number, .. } = event {
-            if *move_number != last + 1 {
+            if prev.is_some_and(|p| *move_number != p + 1) {
                 return false;
             }
-            last = *move_number;
+            prev = Some(*move_number);
+            count += 1;
         }
     }
-    last == now
+    count + 1 == now
+        && match prev {
+            None => true,
+            Some(last) => last == now || last + 1 == now,
+        }
 }
 
 struct Planes<'a> {
@@ -1493,6 +1501,52 @@ mod tests {
             let t = tight_of(&log);
             assert_eq!(at_king(&t), 1.0, "{name}: 真の相手玉が候補に無い");
             assert_eq!(t, upper, "{name}: 上界へ戻る");
+        }
+        // 受理手の手数を適用前の値（初手が 1。webhook のセッションの規約）で付けたログは、欠けていない:
+        // 締めた候補は審判の規約のログと同じ。途中が欠ければ、この規約でも上界へ戻る
+        let renumber = |log: &ObservationLog| -> ObservationLog {
+            let mut out = ObservationLog::default();
+            for e in log.events() {
+                out.record(match e.clone() {
+                    Observation::MyMove { move_number, usi, captured } => {
+                        Observation::MyMove { move_number: move_number - 1, usi, captured }
+                    }
+                    Observation::OpponentMoved { move_number, captured_my_piece_at } => {
+                        Observation::OpponentMoved { move_number: move_number - 1, captured_my_piece_at }
+                    }
+                    other => other,
+                });
+            }
+            out
+        };
+        let before = renumber(full);
+        assert!(moves_contiguous(&before, view.move_number));
+        assert_eq!(tight_of(&before), tight_of(full), "適用前の規約のログでも締めた候補を使う");
+        let mut before_gap = ObservationLog::default();
+        for e in before.events() {
+            if !matches!(e, Observation::OpponentMoved { move_number: 3, .. }) {
+                before_gap.record(e.clone());
+            }
+        }
+        assert!(!moves_contiguous(&before_gap, view.move_number));
+        assert_eq!(tight_of(&before_gap), upper, "適用前の規約でも、欠ければ上界へ戻る");
+        // 最後の受理手だけが欠けたログ・先頭だけが欠けたログ（どちらの規約でも数が合わない）
+        for log in [full, &before] {
+            let events = log.events();
+            let accepted = |e: &Observation| matches!(e, Observation::MyMove { .. } | Observation::OpponentMoved { .. });
+            let (first, last) = (
+                events.iter().position(accepted).unwrap(),
+                events.iter().rposition(accepted).unwrap(),
+            );
+            for skip in [first, last] {
+                let mut cut = ObservationLog::default();
+                for (i, e) in events.iter().enumerate() {
+                    if i != skip {
+                        cut.record(e.clone());
+                    }
+                }
+                assert!(!moves_contiguous(&cut, view.move_number), "受理手 {skip} が欠けたログ");
+            }
         }
     }
 

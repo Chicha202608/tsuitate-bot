@@ -1736,6 +1736,27 @@ mod tests {
         assert_eq!(mv.len(), 7);
     }
 
+    /// webhook のセッションが作る観測ログは、エンコーダ v6 から見て「履歴が欠けていない」ログになる
+    /// （欠けていると締めた相手玉の候補が上界へ戻る = 学習の自己対局と違う入力になる）。このセッションは受理手の
+    /// 手数を適用前の値（初手が 1）で記録し、審判・サーバーは適用後の値（初手が 2）で記録する
+    #[test]
+    fn session_log_is_contiguous_for_the_encoder() {
+        for (color, name) in [(Color::Sente, "b"), (Color::Gote, "w")] {
+            let positions = synth_positions(41, color);
+            let mut session = GameSession::new("heuristic", color).unwrap();
+            // 自分の手番になる ply まで進める（先手は偶数 ply の後、後手は奇数 ply の後）
+            let ply = if color == Color::Sente { 40 } else { 41 };
+            advance(&mut session, &positions, ply).unwrap();
+            let req = request("g-contig", name, ply, positions);
+            let view = build_player_view(&session, &req).unwrap();
+            assert_eq!(view.move_number, ply + 1);
+            assert!(
+                crate::rl::encode::moves_contiguous(&session.log, view.move_number),
+                "{color:?}: webhook のログが欠けていると判定された"
+            );
+        }
+    }
+
     /// estimator_v10 での実測（手動実行用）。particle filter を含むため遅く、
     /// 通常の `cargo test` では走らせない: `cargo test -- --ignored` で確認する
     #[test]

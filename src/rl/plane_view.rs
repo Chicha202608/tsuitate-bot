@@ -135,6 +135,9 @@ fn layout() -> Vec<Spec> {
     add(e::D_KING, G_FACT, "相手玉がいうるマス".into(), Unit::Board);
     add(e::E_KING_TIGHT, G_FACT, "相手玉がいうるマス（締めた版）".into(), Unit::Board);
     add(e::D_PAWN, G_FACT, "動けないと確定した相手の歩".into(), Unit::Board);
+    // 相手に位置が伝わっている自駒
+    add(e::E_EXPOSED, G_OWN, "相手に伝わっている自駒: 駒を取ったまま動いていない（鮮度）".into(), Unit::Board);
+    add(e::E_EXPOSED + 1, G_OWN, "相手に伝わっている自駒: 王手をかけた手で動かしたまま（鮮度）".into(), Unit::Board);
     // 自駒の利きと自玉の筋
     add(e::E_OWN_ATTACK, G_REACH, "自駒の確実な利き（枚数×1/3）".into(), Unit::Board);
     add(e::E_OWN_ATTACK + 1, G_REACH, "自駒の遮られうる利き（飛び駒の2マス目以降。枚数×1/3）".into(), Unit::Board);

@@ -123,11 +123,11 @@ pub(crate) const E_PAWN_FILE: usize = E_CAP_ROLE + 7; // 1: 相手の歩を取�
 const COUNT_STEP: f32 = 1.0 / 3.0;
 /// エンコーダ v5 のプレーン数（v4 + 取られた駒種の鮮度 7枚 + 取られた駒種のマス 7枚 + 取った駒種のマス 7枚 + 歩を取った筋 1枚）
 pub const NUM_PLANES_V5: usize = E_PAWN_FILE + 1;
-// エンコーダ v6（2026-11-23。設計 doc の「エンコーダ v3」の節の v6）。v5 の後ろに、安く作れる確定事実と集計を6組。
+// エンコーダ v6（2026-11-23。設計 doc の「エンコーダ v3」の節の v6）。v5 の後ろに、安く作れる確定事実と集計を7組。
 // 1組ずつ効きを確かめるのは高くつく（本番の大きさで3日、CI の大きさでは v5 の差も再現しなかった。
 // docs/rl-input-ab.md）ので、まとめて足して版ごとに1回確かめる。組の扱いは v3〜v5 と同じ（並びは固定で、使う組は
 // ネットが選ぶ。tsuitate-nn の `--king-tight-planes` / `--check-clock-planes` / `--checker-memo-planes` /
-// `--own-attack-planes` / `--king-line-planes` / `--opp-count-planes`）
+// `--own-attack-planes` / `--king-line-planes` / `--opp-count-planes` / `--exposed-planes`）
 pub(crate) const E_KING_TIGHT: usize = NUM_PLANES_V5; // 1: 相手玉がいうるマス（締めた版。deduce_king::opp_king_candidates_tight）
 pub(crate) const E_CHECK_CLOCK: usize = E_KING_TIGHT + 1; // 6: 王手からの手数（全面に放送）
 pub(crate) const CC_GAVE_EVER: usize = 0; // 王手をかけたことがある
@@ -150,11 +150,15 @@ pub(crate) const OC_MOVES: usize = 3; // 相手が指した手
 /// 張り付くのが 1% に満たない値にした（王手 99% 点 10〜15・最大 37、駒取り 99% 点 16〜20・最大 33、
 /// 王手かつ駒取り 99% 点 3〜5・最大 15。指した手は手数の上限の半分）
 pub(crate) const OPP_COUNT_CAPS: [u32; 4] = [20, 30, 10, MAX_PLIES / 2];
+// 相手に位置が伝わっている自駒。相手は「自分の駒を取られたマス」と「王手を受けたこと」を審判から知らされるので、
+// 駒を取った自駒はそのマスにいると分かり、王手をかけた手で動かした駒も王手の筋から当たりを付けられる。その駒が
+// 動くか取られるまで印を残す。値はその手からの鮮度（0.95^手数。`P_CAP` / `P_GAVE_CHECK` の同じマスの値と同じ）
+pub(crate) const E_EXPOSED: usize = E_OPP_COUNT + 4; // 2: 駒を取ったまま動いていない自駒, 王手をかけた手で動かしたまま動いていない自駒
 /// エンコーダ v6 のプレーン数（v5 + 締めた相手玉の候補 1枚 + 王手からの手数 6枚 + 逃げた王手駒の候補 1枚 +
-/// 自駒の利き 2枚 + 自玉の筋 2枚 + 相手の手数の合計 4枚）
-pub const NUM_PLANES_V6: usize = E_OPP_COUNT + 4;
+/// 自駒の利き 2枚 + 自玉の筋 2枚 + 相手の手数の合計 4枚 + 相手に位置が伝わっている自駒 2枚）
+pub const NUM_PLANES_V6: usize = E_EXPOSED + 2;
 /// v3 以降で足したプレーンの組（名前, 先頭のプレーン, 枚数）。tsuitate-nn の `model.EXTRA_PLANES` と同じ
-pub const EXTRA_PLANE_GROUPS: [(&str, usize, usize); 13] = [
+pub const EXTRA_PLANE_GROUPS: [(&str, usize, usize); 14] = [
     ("opp_hand", E_HAND, 7),
     ("opp_fouls", E_FOUL, 3),
     ("king_fouls", E_KING_FOUL, 1),
@@ -168,6 +172,7 @@ pub const EXTRA_PLANE_GROUPS: [(&str, usize, usize); 13] = [
     ("own_attacks", E_OWN_ATTACK, 2),
     ("king_lines", E_KING_LINE, 2),
     ("opp_counts", E_OPP_COUNT, 4),
+    ("exposed", E_EXPOSED, 2),
 ];
 
 /// プレーン数 → 観測の長さ。対応するエンコーダが無いプレーン数は None
@@ -316,7 +321,8 @@ const LINE_DIRS: [(i8, i8); 8] = [(0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (1
 /// `NUM_PLANES_DEDUCED * 81` は v2（v1 の後ろに確定事実のプレーン）、`NUM_PLANES_V3 * 81` は v3
 /// （v2 の後ろに相手の持ち駒の上界と相手の反則の時系列）、`NUM_PLANES_V4 * 81` は v4（v3 の後ろに玉の移動で反則したマス）、
 /// `NUM_PLANES_V5 * 81` は v5（v4 の後ろに取った駒・取られた駒の一覧）、`NUM_PLANES_V6 * 81` は v6
-/// （v5 の後ろに、締めた相手玉の候補・王手からの手数・逃げた王手駒の候補・自駒の利き・自玉の筋・相手の手数の合計）
+/// （v5 の後ろに、締めた相手玉の候補・王手からの手数・逃げた王手駒の候補・自駒の利き・自玉の筋・相手の手数の合計・
+/// 相手に位置が伝わっている自駒）
 pub fn encode_into(
     view: &PlayerView,
     log: &ObservationLog,
@@ -403,6 +409,9 @@ pub fn encode_into_cached(
     let mut checker_memo: Option<(Vec<Coord>, usize, u32)> = None;
     // 相手の手数の合計（v6。並びは `OC_*`）。王手かどうかは直後の `Check` で分かる
     let mut opp_counts = [0u32; 4];
+    // 相手に位置が伝わっている自駒（v6）: [駒を取った, 王手をかけた手で動かした] ごとの（マス, その手の手数）。
+    // その駒が動いたら・取られたら外す
+    let mut exposed: [Vec<(Coord, u32)>; 2] = Default::default();
     for event in log.events() {
         let lost_before = model.lost_pieces().len();
         match event {
@@ -428,6 +437,13 @@ pub fn encode_into_cached(
                     // 自駒が着地した・通り抜けたマスに、いまその駒はいない
                     if let Some((cands, _, _)) = &mut checker_memo {
                         cands.retain(|&c| c != to && !from.is_some_and(|f| on_path(f, to, c)));
+                    }
+                    // 動いた駒の印は外す。駒を取った駒は、取ったマスにいると相手に伝わる
+                    for marks in &mut exposed {
+                        marks.retain(|&(c, _)| Some(c) != from && c != to);
+                    }
+                    if captured.is_some() {
+                        exposed[0].push((to, *move_number));
                     }
                 }
                 if let Some((from, to)) = move_squares(usi) {
@@ -471,6 +487,11 @@ pub fn encode_into_cached(
                 last_opp_capture = captured_my_piece_at.as_deref().and_then(parse_usi_square);
                 opp_counts[OC_MOVES] += 1;
                 opp_counts[OC_CAPTURES] += last_opp_capture.is_some() as u32;
+                if let Some(x) = last_opp_capture {
+                    for marks in &mut exposed {
+                        marks.retain(|&(c, _)| c != x);
+                    }
+                }
                 since_gave += 1;
                 since_got += 1;
                 last_opp_free = !gave_check_last && last_opp_capture.is_none();
@@ -529,6 +550,7 @@ pub fn encode_into_cached(
                 } else {
                     if let Some((_, to)) = my_moves.last().and_then(|u| move_squares(u)) {
                         p.max(P_GAVE_CHECK, to, fresh(last_mn));
+                        exposed[1].push((to, last_mn));
                     }
                     gave_check_last = true;
                     gave_ever = true;
@@ -720,6 +742,16 @@ pub fn encode_into_cached(
         // 相手の手数の合計
         for (k, &n) in opp_counts.iter().enumerate() {
             p.fill(E_OPP_COUNT + k, n.min(OPP_COUNT_CAPS[k]) as f32 / OPP_COUNT_CAPS[k] as f32);
+        }
+        // 相手に位置が伝わっている自駒。着手履歴が欠けていると、動いた・取られたを追えないので書かない
+        if !history_broken {
+            for (k, marks) in exposed.iter().enumerate() {
+                for &(c, mn) in marks {
+                    if board.piece_at(c).is_some() {
+                        p.set(E_EXPOSED + k, c, fresh(mn));
+                    }
+                }
+            }
         }
     }
 
@@ -1152,12 +1184,15 @@ mod tests {
     ///   どちらかのプレーンに値がある
     /// - 自玉の筋: 筋の上に自駒はおらず、王手中の真の王手駒（桂以外）は筋の上にいる。ピンされうる自駒のマスには自駒がいる
     /// - 相手の手数の合計は、審判の盤で数え直した値（王手・駒取り・王手かつ駒取り・指した手）と一致する
+    /// - 相手に位置が伝わっている自駒は、審判の盤で追った「駒を取ったまま／王手をかけた手で動かしたまま、動いても
+    ///   取られてもいない自駒」のマスと一致し、値は v1 の取ったマス・王手をかけた手の移動先の鮮度と同じ
     #[test]
     fn v6の足したプレーンは真の盤面と矛盾しない() {
         let mut rng = StdRng::seed_from_u64(16);
         let idx = |c: Color| (c == Color::Gote) as usize;
         let clock = |n: u32| n.min(CLOCK_CAP) as f32 / CLOCK_CAP as f32;
         let (mut n, mut n_tight, mut n_memo, mut n_checks, mut n_free, mut n_pin, mut n_both) = (0, 0, 0, 0, 0, 0, 0);
+        let mut n_exposed = [0u32; 2];
         let (mut v5, mut v6) = (vec![0.0; NUM_PLANES_V5 * 81], vec![0.0; NUM_PLANES_V6 * 81]);
         for game in 0..24 {
             let mut referee = Referee::new();
@@ -1166,6 +1201,8 @@ mod tests {
             let mut cnt = [[0u32; 4]; 2];
             // 相手の手数の合計の数え直し（側ごと。並びは `OC_*`）
             let mut total = [[0u32; 4]; 2];
+            // 相手に位置が伝わっている自駒の数え直し（側ごとの [駒を取った, 王手をかけた手で動かした] のマス）
+            let mut marks: [[HashSet<Coord>; 2]; 2] = Default::default();
             // 途中状態を使い回して書く（毎回たどり直すのと同じ観測になることは上のテストが見ている）
             let mut caches: [[DeducedCache; 2]; 2] = Default::default();
             loop {
@@ -1198,6 +1235,16 @@ mod tests {
                     }
                     // 逃げた王手駒の候補
                     assert!(plane(&v6, E_CHECKER_MEMO).iter().sum::<f32>() <= 1.0 + 1e-4);
+                    // 相手に位置が伝わっている自駒
+                    let mine = |c: Coord| pos.piece_at(c).is_some_and(|pc| pc.color == s);
+                    for (k, src) in [P_CAP, P_GAVE_CHECK].into_iter().enumerate() {
+                        for c in squares() {
+                            let want = if marks[idx(s)][k].contains(&c) { at(src, c) } else { 0.0 };
+                            assert_eq!(at(E_EXPOSED + k, c), want, "game {game} {s:?}: 伝わっている自駒 {k} の {c:?}");
+                            assert!(want == 0.0 || mine(c), "印のマスに自駒がいない");
+                            n_exposed[k] += (want > 0.0) as u32;
+                        }
+                    }
                     // 相手の手数の合計
                     for (k, &t) in total[idx(s)].iter().enumerate() {
                         let w = t.min(OPP_COUNT_CAPS[k]) as f32 / OPP_COUNT_CAPS[k] as f32;
@@ -1212,7 +1259,6 @@ mod tests {
                         assert!(!real || sure || maybe, "game {game} {s:?}: 真の利き {c:?} がどちらのプレーンにも無い");
                     }
                     // 自玉の筋
-                    let mine = |c: Coord| pos.piece_at(c).is_some_and(|pc| pc.color == s);
                     for c in squares() {
                         assert!(at(E_KING_LINE, c) == 0.0 || !mine(c), "筋の上に自駒がいる");
                         if at(E_KING_LINE + 1, c) > 0.0 {
@@ -1250,6 +1296,25 @@ mod tests {
                 let captured = count(after, other) < count(&pos, other);
                 let gives_check = referee.view(other, [0, 0], game).you_in_check;
                 let (i, j) = (idx(side), idx(other));
+                let (from, to) = match parse_usi(&usi) {
+                    Some(ShogiMove::Board { from, to, .. }) => (Some(from), to),
+                    Some(ShogiMove::Drop { to, .. }) => (None, to),
+                    None => unreachable!("受理された手は読める"),
+                };
+                // 動いた駒・取られた駒の印を外し、駒を取った駒・王手をかけた手で動かした駒に印を付ける
+                for k in 0..2 {
+                    marks[j][k].remove(&to);
+                    marks[i][k].remove(&to);
+                    if let Some(f) = from {
+                        marks[i][k].remove(&f);
+                    }
+                }
+                if captured {
+                    marks[i][0].insert(to);
+                }
+                if gives_check {
+                    marks[i][1].insert(to);
+                }
                 total[j][OC_MOVES] += 1;
                 total[j][OC_CAPTURES] += captured as u32;
                 total[j][OC_CHECKS] += gives_check as u32;
@@ -1283,12 +1348,13 @@ mod tests {
         }
         println!(
             "{n} 観測: 締めた候補が元より狭い {n_tight} / 王手 {n_checks}（うち駒取り {n_both}）/ 自由な手 {n_free} / \
-             逃げた王手駒 {n_memo} / ピンされうる自駒 {n_pin}"
+             逃げた王手駒 {n_memo} / ピンされうる自駒 {n_pin} / 伝わっている自駒 {n_exposed:?}"
         );
         assert!(
             n_tight > 0 && n_checks > 0 && n_both > 0 && n_free > 0 && n_memo > 0 && n_pin > 0,
             "v6 の検査が空振りしている"
         );
+        assert!(n_exposed.iter().all(|&x| x > 0), "伝わっている自駒の検査が空振りしている");
     }
 
     /// エンコーダ v3 の前半は v2 と同じ・v4 の前半は v3 と同じで、足した組は審判の真実から数え直した値と一致する:

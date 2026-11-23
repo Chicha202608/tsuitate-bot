@@ -56,6 +56,8 @@ enum Unit {
     Plies,
     /// 値 × 王手からの手数の上限 = 相手の手数（上限で張り付く）
     Clock,
+    /// 値 × 3 = 回数（3回で張り付く）
+    Count3,
     /// 鮮度などそのままの値
     Raw,
 }
@@ -75,6 +77,8 @@ const G_FACT: &str = "王手と確定事実";
 const G_REACH: &str = "自駒の利きと自玉の筋";
 const G_COUNT: &str = "持ち駒と相手の駒数（全面）";
 const G_STATE: &str = "局面の数値（全面）";
+const G_LOG_BOARD: &str = "直近の手の記録（相手が駒を取ったマス）";
+const G_LOG: &str = "直近の手の記録（全面）";
 
 /// 全プレーンの見出し（表示する順）
 fn layout() -> Vec<Spec> {
@@ -174,6 +178,20 @@ fn layout() -> Vec<Spec> {
     add(c + e::CC_GOT_EVER, G_STATE, "王手を受けたことがある".into(), Unit::Flag);
     add(c + e::CC_GOT_MOVES, G_STATE, "最後に王手を受けてからの相手の手数（まだなら初手から）".into(), Unit::Clock);
     add(c + e::CC_GOT_FREE, G_STATE, "　そのうち自由な手（応手・駒取り・王手でない手）".into(), Unit::Clock);
+    // 直近の手の記録（新しい順）
+    for k in 0..e::LOG_MOVES {
+        let base = e::E_MOVE_LOG + k * e::LOG_SLOT;
+        add(base + e::ML_OPP_CAP, G_LOG_BOARD, format!("相手の {}手前の手が取ったマス", k + 1), Unit::Board);
+    }
+    for k in 0..e::LOG_MOVES {
+        let base = e::E_MOVE_LOG + k * e::LOG_SLOT;
+        let n = k + 1;
+        add(base + e::ML_OPP_CHECK, G_LOG, format!("相手の {n}手前: 王手だった"), Unit::Flag);
+        add(base + e::ML_OPP_FOULS, G_LOG, format!("相手の {n}手前: その手番の反則"), Unit::Count3);
+        add(base + e::ML_MY_CAP, G_LOG, format!("自分の {n}手前: 駒を取った"), Unit::Flag);
+        add(base + e::ML_MY_CHECK, G_LOG, format!("自分の {n}手前: 王手だった"), Unit::Flag);
+        add(base + e::ML_MY_FOULS, G_LOG, format!("自分の {n}手前: その手番の反則"), Unit::Count3);
+    }
     out
 }
 
@@ -204,6 +222,8 @@ fn note_of(unit: Unit, v: f32) -> Option<String> {
         Unit::Flag => Some(if v > 0.5 { "はい" } else { "いいえ" }.to_string()),
         Unit::Clock if v >= 1.0 => Some(format!("{}手以上", e::CLOCK_CAP)),
         Unit::Clock => Some(count(v * e::CLOCK_CAP as f32, "手")),
+        Unit::Count3 if v >= 1.0 => Some("3回以上".to_string()),
+        Unit::Count3 => Some(count(v * 3.0, "回")),
         Unit::Raw | Unit::Board => None,
     }
 }

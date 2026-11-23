@@ -12,7 +12,9 @@ use crate::board::make_usi_square;
 use crate::observation::ObservationLog;
 use crate::protocol::PlayerView;
 use crate::rl::action::{index_square, normalize};
-use crate::rl::encode::{self as e, HISTORY_MOVES, NUM_PLANES, NUM_PLANES_DEDUCED, NUM_PLANES_V3, NUM_PLANES_V4, NUM_PLANES_V5};
+use crate::rl::encode::{
+    self as e, HISTORY_MOVES, NUM_PLANES, NUM_PLANES_DEDUCED, NUM_PLANES_V3, NUM_PLANES_V4, NUM_PLANES_V5, NUM_PLANES_V6,
+};
 use crate::selfplay::{MAX_FOULS, MAX_PLIES};
 
 /// 駒種の見出し（`encode::ROLES` の順。先頭の7つは持ち駒の駒種 `HAND_ROLES` の順でもある）
@@ -24,12 +26,12 @@ const KANJI: [&str; 14] = [
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaneView {
-    /// プレーン番号（0 始まり）。入力には無い参考の1枚は None
+    /// プレーン番号（0 始まり）。いまは必ず Some（入力には無い参考の盤を並べるときのために Option のまま）
     pub index: Option<usize>,
     /// 組の見出し
     pub group: &'static str,
     pub label: String,
-    /// 足したエンコーダの版（"v1"〜"v5"。参考の1枚は "参考"）
+    /// 足したエンコーダの版（"v1"〜"v6"）
     pub version: &'static str,
     /// 全面に同じ値を入れるプレーンなら、その値
     pub scalar: Option<f32>,
@@ -52,6 +54,8 @@ enum Unit {
     Flag,
     /// 値 × 手数の上限 = 手数
     Plies,
+    /// 値 × 上限 = 相手の手数（上限で張り付く）
+    Moves(u32),
     /// 鮮度などそのままの値
     Raw,
 }
@@ -68,6 +72,7 @@ const G_HIST: &str = "自分の手の履歴";
 const G_TRADE: &str = "駒の取り合い";
 const G_FOUL: &str = "反則";
 const G_FACT: &str = "王手と確定事実";
+const G_REACH: &str = "自駒の利きと自玉の筋";
 const G_COUNT: &str = "持ち駒と相手の駒数（全面）";
 const G_STATE: &str = "局面の数値（全面）";
 
@@ -126,8 +131,18 @@ fn layout() -> Vec<Spec> {
     add(e::D_OCC, G_FACT, "相手の駒がいると確定したマス".into(), Unit::Board);
     add(e::D_BLOCK, G_FACT, "飛び越え反則の間のマス（1/マス数）".into(), Unit::Board);
     add(e::D_CHECKER, G_FACT, "王手駒がいうるマス（1/候補数）".into(), Unit::Board);
+    add(e::E_CHECKER_MEMO, G_FACT, "逃げた王手駒がいたかもしれないマス（鮮度÷候補数）".into(), Unit::Board);
     add(e::D_KING, G_FACT, "相手玉がいうるマス".into(), Unit::Board);
+    add(e::E_KING_TIGHT, G_FACT, "相手玉がいうるマス（締めた版）".into(), Unit::Board);
     add(e::D_PAWN, G_FACT, "動けないと確定した相手の歩".into(), Unit::Board);
+    // 相手に位置が伝わっている自駒
+    add(e::E_EXPOSED, G_OWN, "相手に伝わっている自駒: 駒を取ったまま動いていない（鮮度）".into(), Unit::Board);
+    add(e::E_EXPOSED + 1, G_OWN, "相手に伝わっている自駒: 王手をかけた手で動かしたまま（鮮度）".into(), Unit::Board);
+    // 自駒の利きと自玉の筋
+    add(e::E_OWN_ATTACK, G_REACH, "自駒の確実な利き（枚数×1/3）".into(), Unit::Board);
+    add(e::E_OWN_ATTACK + 1, G_REACH, "自駒の遮られうる利き（飛び駒の2マス目以降。枚数×1/3）".into(), Unit::Board);
+    add(e::E_KING_LINE, G_REACH, "自玉の筋（最初の自駒の手前まで）".into(), Unit::Board);
+    add(e::E_KING_LINE + 1, G_REACH, "ピンされうる自駒（自玉の筋の最初の自駒）".into(), Unit::Board);
     // 持ち駒と相手の駒数
     for (i, k) in KANJI[..7].iter().enumerate() {
         add(e::P_HAND + i, G_COUNT, format!("自分の持ち駒 {k}"), Unit::Pieces(e::ROLE_TOTAL[i]));
@@ -155,6 +170,18 @@ fn layout() -> Vec<Spec> {
     add(e::E_FOUL + e::EF_LAST, G_STATE, "相手の直前の手番の反則数".into(), Unit::Fouls);
     add(e::E_FOUL + e::EF_CHECKED, G_STATE, "相手の反則: 王手を受けていた手番（鮮度つきの合計）".into(), Unit::Fouls);
     add(e::E_FOUL + e::EF_FREE, G_STATE, "相手の反則: 王手を受けていない手番（鮮度つきの合計）".into(), Unit::Fouls);
+    let c = e::E_CHECK_CLOCK;
+    add(c + e::CC_GAVE_EVER, G_STATE, "王手をかけたことがある".into(), Unit::Flag);
+    add(c + e::CC_GAVE_MOVES, G_STATE, "最後に王手をかけてからの相手の手数（まだなら初手から）".into(), Unit::Moves(e::CLOCK_CAP));
+    add(c + e::CC_GAVE_FREE, G_STATE, "　そのうち自由な手（応手・駒取り・王手でない手）".into(), Unit::Moves(e::CLOCK_CAP));
+    add(c + e::CC_GOT_EVER, G_STATE, "王手を受けたことがある".into(), Unit::Flag);
+    add(c + e::CC_GOT_MOVES, G_STATE, "最後に王手を受けてからの相手の手数（まだなら初手から）".into(), Unit::Moves(e::CLOCK_CAP));
+    add(c + e::CC_GOT_FREE, G_STATE, "　そのうち自由な手（応手・駒取り・王手でない手）".into(), Unit::Moves(e::CLOCK_CAP));
+    let (o, caps) = (e::E_OPP_COUNT, e::OPP_COUNT_CAPS);
+    add(o + e::OC_MOVES, G_STATE, "相手が指した手の合計".into(), Unit::Moves(caps[e::OC_MOVES]));
+    add(o + e::OC_CHECKS, G_STATE, "　うち王手をかけてきた手".into(), Unit::Moves(caps[e::OC_CHECKS]));
+    add(o + e::OC_CAPTURES, G_STATE, "　うち駒を取ってきた手".into(), Unit::Moves(caps[e::OC_CAPTURES]));
+    add(o + e::OC_BOTH, G_STATE, "　うち王手をかけながら駒を取ってきた手".into(), Unit::Moves(caps[e::OC_BOTH]));
     out
 }
 
@@ -164,7 +191,8 @@ fn version_of(index: usize) -> &'static str {
         i if i < NUM_PLANES_DEDUCED => "v2",
         i if i < NUM_PLANES_V3 => "v3",
         i if i < NUM_PLANES_V4 => "v4",
-        _ => "v5",
+        i if i < NUM_PLANES_V5 => "v5",
+        _ => "v6",
     }
 }
 
@@ -182,18 +210,19 @@ fn note_of(unit: Unit, v: f32) -> Option<String> {
         Unit::Fouls => Some(count(v * MAX_FOULS as f32, "回")),
         Unit::Plies => Some(count(v * MAX_PLIES as f32, "手目")),
         Unit::Flag => Some(if v > 0.5 { "はい" } else { "いいえ" }.to_string()),
+        Unit::Moves(cap) if v >= 1.0 => Some(format!("{cap}手以上")),
+        Unit::Moves(cap) => Some(count(v * cap as f32, "手")),
         Unit::Raw | Unit::Board => None,
     }
 }
 
-/// `view` の側の観測から作った入力（エンコーダ v5 の全プレーン）を、表示する順に返す。入力には無い参考の1枚
-/// （`deduce_king` の締めた相手玉の候補。`index` が None）を、見比べやすいよう元の候補（`D_KING`）のすぐ後ろに挟む
+/// `view` の側の観測から作った入力（エンコーダ v6 の全プレーン）を、表示する順に返す
 pub fn plane_views(view: &PlayerView, log: &ObservationLog, foul_tried: &HashSet<String>) -> Vec<PlaneView> {
     let color = view.your_color;
-    let buf = e::encode_planes(NUM_PLANES_V5, view, log, foul_tried);
+    let buf = e::encode_planes(NUM_PLANES_V6, view, log, foul_tried);
     // マス番号（正規化済み）→ 実際のマス。`normalize` は自分自身が逆変換
     let square = |i: usize| make_usi_square(normalize(index_square(i), color));
-    let mut out: Vec<PlaneView> = layout()
+    layout()
         .into_iter()
         .map(|spec| {
             let plane = &buf[spec.index * 81..(spec.index + 1) * 81];
@@ -219,22 +248,7 @@ pub fn plane_views(view: &PlayerView, log: &ObservationLog, foul_tried: &HashSet
                 cells,
             }
         })
-        .collect();
-    let extra = PlaneView {
-        index: None,
-        group: G_FACT,
-        label: "相手玉がいうるマス（締めた版。入力には未採用）".into(),
-        version: "参考",
-        scalar: None,
-        note: None,
-        cells: crate::deduce_king::opp_king_candidates_tight(color, log)
-            .into_iter()
-            .map(|c| (make_usi_square(c), 1.0))
-            .collect(),
-    };
-    let after = out.iter().position(|p| p.index == Some(e::D_KING)).map_or(out.len(), |i| i + 1);
-    out.insert(after, extra);
-    out
+        .collect()
 }
 
 #[cfg(test)]
@@ -248,13 +262,14 @@ mod tests {
     fn 見出しは全部のプレーンをちょうど1回ずつ覆う() {
         let mut seen: Vec<usize> = layout().iter().map(|s| s.index).collect();
         seen.sort();
-        assert_eq!(seen, (0..NUM_PLANES_V5).collect::<Vec<_>>());
+        assert_eq!(seen, (0..NUM_PLANES_V6).collect::<Vec<_>>());
         // 版の境目は v3 以降の組の並びと合う
         for (name, start, n) in EXTRA_PLANE_GROUPS {
             let want = match name {
                 "opp_hand" | "opp_fouls" => "v3",
                 "king_fouls" => "v4",
-                _ => "v5",
+                "lost_fresh" | "lost_roles" | "cap_roles" | "pawn_files" => "v5",
+                _ => "v6",
             };
             for i in start..start + n {
                 assert_eq!(version_of(i), want, "{name} の {i}番");
@@ -277,7 +292,7 @@ mod tests {
             for me in [Color::Sente, Color::Gote] {
                 let view = make_view(&rep.pos, me, &rep.fouls);
                 let log = &rep.logs[side_idx(me)];
-                let buf = e::encode_planes(NUM_PLANES_V5, &view, log, &none);
+                let buf = e::encode_planes(NUM_PLANES_V6, &view, log, &none);
                 for spec in &specs {
                     let plane = &buf[spec.index * 81..(spec.index + 1) * 81];
                     if !matches!(spec.unit, Unit::Board) {
@@ -290,7 +305,7 @@ mod tests {
                     }
                 }
                 let views = plane_views(&view, log, &none);
-                assert_eq!(views.len(), NUM_PLANES_V5 + 1);
+                assert_eq!(views.len(), NUM_PLANES_V6);
                 let at = |index: usize| views.iter().find(|v| v.index == Some(index)).unwrap();
                 // 自玉のプレーンは自玉のマス1つだけ
                 let king_role = e::ROLES.iter().position(|r| *r == Role::King).unwrap();
@@ -301,9 +316,9 @@ mod tests {
                 let opp_king = make_usi_square(rep.pos.king_square(me.other()).unwrap());
                 let cands = &at(e::D_KING).cells;
                 assert!(cands.contains_key(&opp_king), "ply={ply} {me:?}: 相手玉の候補");
-                let extra = views.iter().position(|v| v.index.is_none()).unwrap();
-                assert_eq!(views[extra - 1].index, Some(e::D_KING), "参考の1枚は元の候補のすぐ後ろ");
-                let tight = &views[extra].cells;
+                let pos = views.iter().position(|v| v.index == Some(e::E_KING_TIGHT)).unwrap();
+                assert_eq!(views[pos - 1].index, Some(e::D_KING), "締めた版は元の候補のすぐ後ろ");
+                let tight = &views[pos].cells;
                 assert!(tight.contains_key(&opp_king), "ply={ply} {me:?}: 締めた候補");
                 assert!(tight.keys().all(|k| cands.contains_key(k)), "ply={ply} {me:?}: 締めた候補は元の候補の中");
                 // 手数は読める形で付く

@@ -1,0 +1,18 @@
+{
+  "_note": "このファイルを .github/ci/input-ab.request.json という名前で push すると Input A/B（.github/workflows/input-ab.yml）が走る。使い方と読み方は docs/rl-input-ab.md。_ で始まるキーはメモ（読まない）。書かなかったキーは既定値",
+  "arms": "v4 v5",
+  "_extra_arms_note": "新しい入力の組を試すときは、腕を足す: {\"v6k\": \"--planes 91 --opp-hand-planes ... --新しい組のフラグ\"}（train_rnad.py の引数。名前は英数字）。そのうえで treat をその名前にする",
+  "extra_arms": {},
+  "control": "v4",
+  "treat": "v5",
+  "seeds": 8,
+  "steps": 1600,
+  "stages": 2,
+  "stage_minutes": 290,
+  "export_every": 100,
+  "games": 100,
+  "horizons": 4,
+  "refs": "heuristic rl_v15",
+  "_nn_ref_note": "学習側（tsuitate-nn の rnad/input_ab.py と train_rnad.py）の ref。新しい組のフラグをまだ main に入れていなければ、そのブランチ名",
+  "nn_ref": "main"
+}

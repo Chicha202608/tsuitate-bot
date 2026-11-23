@@ -1,0 +1,294 @@
+name: Input A/B
+
+# 入力プレーンの組の A/B を、CI の CPU で回る大きさの自己対局で比べる（docs/rl-input-ab.md）。
+# 腕（入力の版）× seed ごとに、乱数初期化の小さいネット（32ch×3・1更新 64局）を自己対局だけで育て、
+# 同じ更新どうしを arena で総当たりにして、腕どうしの勝率を seed の取り直しの幅つきで出す。
+# 起動は次の2通り（通常のコード push では走らない）:
+#   1. 手動起動: gh workflow run input-ab.yml --ref <ブランチ> -f arms="v4 v5" -f seeds=8
+#   2. `.github/ci/input-ab.request.json` を含む push（例は input-ab.request.example.json。削除の push は何もしない）
+# 流れ: plan → train1 → train2 → train3（学習。1段 = 1ランナー 4本を stage_minutes 分まで。届かなければ次の段が
+# checkpoint から続ける）→ horizons（比べる時点を選ぶ）→ crossplay（時点ごとに総当たり）→ report（表と判定）。
+# 学習側は tsuitate-nn の rnad/input_ab.py、対局と集計は scripts/ci/input_ab.py。
+on:
+  workflow_dispatch:
+    inputs:
+      arms:
+        description: "入力の版（v1〜v6。スペース区切り）"
+        required: false
+        default: "v4 v5"
+      extra_arms:
+        description: '追加の腕（JSON {"名前": "train_rnad.py の引数"}。新しい組を試すとき）'
+        required: false
+        default: "{}"
+      control:
+        description: "判定の対照の腕"
+        required: false
+        default: "v4"
+      treat:
+        description: "判定の候補の腕"
+        required: false
+        default: "v5"
+      seeds:
+        description: "腕ごとの本数（seed は 1 から。1ランナー 4本）"
+        required: false
+        default: "8"
+      steps:
+        description: "通しの更新回数の上限（1更新 64局）"
+        required: false
+        default: "1600"
+      stages:
+        description: "学習の段の数（1〜3。1段 = stage_minutes 分まで）"
+        required: false
+        default: "2"
+      stage_minutes:
+        description: "1段の学習の時間（分。ジョブの上限 6時間の手前）"
+        required: false
+        default: "290"
+      export_every:
+        description: "重みを書き出す間隔（更新）"
+        required: false
+        default: "100"
+      games:
+        description: "総当たりの 1対の局数（偶数）"
+        required: false
+        default: "100"
+      horizons:
+        description: "比べる時点の数"
+        required: false
+        default: "4"
+      refs:
+        description: "基準の相手（絶対的な強さの目安。スペース区切りの戦略名）"
+        required: false
+        default: "heuristic rl_v15"
+      nn_ref:
+        description: "tsuitate-nn の ref"
+        required: false
+        default: "main"
+  push:
+    paths:
+      - ".github/ci/input-ab.request.json"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.p.outputs.skip }}
+      shards: ${{ steps.p.outputs.shards }}
+      arms: ${{ steps.p.outputs.arms }}
+      extra_arms: ${{ steps.p.outputs.extra_arms }}
+      seeds: ${{ steps.p.outputs.seeds }}
+      control: ${{ steps.p.outputs.control }}
+      treat: ${{ steps.p.outputs.treat }}
+      steps: ${{ steps.p.outputs.steps }}
+      stages: ${{ steps.p.outputs.stages }}
+      stage_minutes: ${{ steps.p.outputs.stage_minutes }}
+      export_every: ${{ steps.p.outputs.export_every }}
+      games: ${{ steps.p.outputs.games }}
+      horizons: ${{ steps.p.outputs.horizons }}
+      refs: ${{ steps.p.outputs.refs }}
+      nn_ref: ${{ steps.p.outputs.nn_ref }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: p
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IN_ARMS: ${{ github.event.inputs.arms }}
+          IN_EXTRA_ARMS: ${{ github.event.inputs.extra_arms }}
+          IN_CONTROL: ${{ github.event.inputs.control }}
+          IN_TREAT: ${{ github.event.inputs.treat }}
+          IN_SEEDS: ${{ github.event.inputs.seeds }}
+          IN_STEPS: ${{ github.event.inputs.steps }}
+          IN_STAGES: ${{ github.event.inputs.stages }}
+          IN_STAGE_MINUTES: ${{ github.event.inputs.stage_minutes }}
+          IN_EXPORT_EVERY: ${{ github.event.inputs.export_every }}
+          IN_GAMES: ${{ github.event.inputs.games }}
+          IN_HORIZONS: ${{ github.event.inputs.horizons }}
+          IN_REFS: ${{ github.event.inputs.refs }}
+          IN_NN_REF: ${{ github.event.inputs.nn_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            python3 scripts/ci/input_ab.py plan > plan.txt
+          else
+            python3 scripts/ci/input_ab.py plan --request .github/ci/input-ab.request.json > plan.txt
+          fi
+          cat plan.txt
+          cat plan.txt >> "$GITHUB_OUTPUT"
+
+  train1:
+    needs: plan
+    if: ${{ needs.plan.outputs.skip != 'true' }}
+    uses: ./.github/workflows/input-ab-train.yml
+    with:
+      stage: 1
+      shards: ${{ needs.plan.outputs.shards }}
+      arms: ${{ needs.plan.outputs.arms }}
+      extra_arms: ${{ needs.plan.outputs.extra_arms }}
+      seeds: ${{ needs.plan.outputs.seeds }}
+      steps: ${{ needs.plan.outputs.steps }}
+      export_every: ${{ needs.plan.outputs.export_every }}
+      stage_minutes: ${{ needs.plan.outputs.stage_minutes }}
+      nn_ref: ${{ needs.plan.outputs.nn_ref }}
+
+  train2:
+    needs: [plan, train1]
+    # 前の段でランナーが落ちていても続ける（落ちたシャードは最初から回し直す）
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' && fromJson(needs.plan.outputs.stages) >= 2 }}
+    uses: ./.github/workflows/input-ab-train.yml
+    with:
+      stage: 2
+      shards: ${{ needs.plan.outputs.shards }}
+      arms: ${{ needs.plan.outputs.arms }}
+      extra_arms: ${{ needs.plan.outputs.extra_arms }}
+      seeds: ${{ needs.plan.outputs.seeds }}
+      steps: ${{ needs.plan.outputs.steps }}
+      export_every: ${{ needs.plan.outputs.export_every }}
+      stage_minutes: ${{ needs.plan.outputs.stage_minutes }}
+      nn_ref: ${{ needs.plan.outputs.nn_ref }}
+
+  train3:
+    needs: [plan, train1, train2]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' && fromJson(needs.plan.outputs.stages) >= 3 }}
+    uses: ./.github/workflows/input-ab-train.yml
+    with:
+      stage: 3
+      shards: ${{ needs.plan.outputs.shards }}
+      arms: ${{ needs.plan.outputs.arms }}
+      extra_arms: ${{ needs.plan.outputs.extra_arms }}
+      seeds: ${{ needs.plan.outputs.seeds }}
+      steps: ${{ needs.plan.outputs.steps }}
+      export_every: ${{ needs.plan.outputs.export_every }}
+      stage_minutes: ${{ needs.plan.outputs.stage_minutes }}
+      nn_ref: ${{ needs.plan.outputs.nn_ref }}
+
+  horizons:
+    needs: [plan, train1, train2, train3]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      steps: ${{ steps.h.outputs.steps }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: iab-train-s*
+          path: parts
+      - name: Merge
+        run: python3 scripts/ci/input_ab.py merge parts iab
+      - id: h
+        env:
+          COUNT: ${{ needs.plan.outputs.horizons }}
+        run: |
+          set -euo pipefail
+          ls iab
+          steps=$(python3 scripts/ci/input_ab.py horizons iab --count "$COUNT")
+          echo "steps=$steps" >> "$GITHUB_OUTPUT"
+
+  crossplay:
+    needs: [plan, horizons]
+    if: ${{ !cancelled() && needs.horizons.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        step: ${{ fromJson(needs.horizons.outputs.steps) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: iab-train-s*
+          path: parts
+      - name: Merge
+        run: python3 scripts/ci/input_ab.py merge parts iab
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --bin arena
+      - name: Crossplay
+        env:
+          STEP: ${{ matrix.step }}
+          GAMES: ${{ needs.plan.outputs.games }}
+          REFS: ${{ needs.plan.outputs.refs }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/input_ab.py crossplay iab --step "$STEP" --games "$GAMES" \
+            --arena target/release/arena --out "results/step$STEP.jsonl" --refs "$REFS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iab-eval-${{ matrix.step }}
+          path: results
+          if-no-files-found: error
+
+  report:
+    needs: [plan, horizons, crossplay]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout tsuitate-nn
+        uses: actions/checkout@v5
+        with:
+          repository: tempakyousuke/tsuitate-nn
+          ref: ${{ needs.plan.outputs.nn_ref }}
+          path: nn
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: iab-train-s*
+          path: parts
+      - name: Merge
+        run: python3 scripts/ci/input_ab.py merge parts iab
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: iab-eval-*
+          path: results
+          merge-multiple: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rl-env
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install -q --upgrade pip
+          python -m pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -q "numpy>=1.26" "maturin>=1.5,<2"
+          maturin build --release -m rl-env/Cargo.toml -o wheels
+          python -m pip install -q wheels/*.whl
+      - name: Depend
+        # 入力の組をどれだけ読んでいるか（表の添え物。落ちても対局の表は出す）
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          (cd nn && python rnad/input_ab.py depend "$GITHUB_WORKSPACE/iab" \
+            --book "$GITHUB_WORKSPACE/rl_openings.json" --out "$GITHUB_WORKSPACE/depend.json")
+      - name: Table
+        env:
+          CONTROL: ${{ needs.plan.outputs.control }}
+          TREAT: ${{ needs.plan.outputs.treat }}
+        run: |
+          set -euo pipefail
+          mkdir -p report
+          dep=()
+          [ -f depend.json ] && dep=(--depend depend.json) && cp depend.json report/
+          if ls results/*.jsonl >/dev/null 2>&1; then
+            python3 scripts/ci/input_ab.py table results --control "$CONTROL" --treat "$TREAT" "${dep[@]}" > report/table.md
+            cp results/*.jsonl report/
+          else
+            echo "## 入力の A/B: 対局の結果が無い（学習が最初の書き出しまで進まなかったか、総当たりが落ちた）" > report/table.md
+          fi
+          { echo; echo "### 学習の進み（直近 50 更新の平均）"; echo; python nn/rnad/input_ab.py status iab; } >> report/table.md
+          # ログにも出す（gh が無い環境からはジョブサマリーを読めない）
+          tee -a "$GITHUB_STEP_SUMMARY" < report/table.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: input-ab-report
+          path: report
+          if-no-files-found: error

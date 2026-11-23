@@ -477,84 +477,7 @@ impl Deduction {
             .iter()
             .find(|p| p.role == Role::King)
             .and_then(|p| parse_usi_square(&p.square))?;
-
-        // 8方向の「最初の自駒の手前まで」
-        let rays: Vec<((i8, i8), Vec<Coord>)> = ALL_DIRS
-            .iter()
-            .map(|&d| {
-                let mut squares = vec![];
-                let mut c = step(king, d, 1);
-                while on_board(c) && !own.contains(&c) {
-                    squares.push(c);
-                    c = step(c, d, 1);
-                }
-                (d, squares)
-            })
-            .collect();
-        // 相手の桂が玉を狙える位置（相手から見て前へ跳んでくる）
-        let forward = if view.your_color == Color::Sente { -2 } else { 2 };
-        let knights: Vec<Coord> = [1, -1]
-            .iter()
-            .map(|&df| Coord {
-                file: king.file + df,
-                rank: king.rank + forward,
-            })
-            .filter(|&c| on_board(c) && !own.contains(&c))
-            .collect();
-
-        let ray_hyp = |d: (i8, i8), i: usize, c: Coord| CheckerHyp {
-            square: c,
-            dir: Some(d),
-            dist: i as i8 + 1,
-        };
-        let knight_hyp = |c: Coord| CheckerHyp {
-            square: c,
-            dir: None,
-            dist: 0,
-        };
-
-        let mut hyps = vec![];
-        match captured_at {
-            None => {
-                for (d, squares) in &rays {
-                    hyps.extend(squares.iter().enumerate().map(|(i, &c)| ray_hyp(*d, i, c)));
-                }
-                hyps.extend(knights.iter().map(|&c| knight_hyp(c)));
-            }
-            Some(x) => {
-                // 着手駒そのものの王手
-                for (d, squares) in &rays {
-                    if let Some(i) = squares.iter().position(|&c| c == x) {
-                        hyps.push(ray_hyp(*d, i, x));
-                    }
-                }
-                if knights.contains(&x) {
-                    hyps.push(knight_hyp(x));
-                }
-                // 開き王手: 元のマス o の先の筋の上
-                for (d, squares) in &rays {
-                    let opens = squares
-                        .iter()
-                        .enumerate()
-                        .take(squares.len().saturating_sub(1))
-                        .find(|&(_, &o)| {
-                            o != x
-                                && reachable(o, x)
-                                && (!check_capture_paths
-                                    || !own.iter().any(|&piece| passes_through(o, x, piece)))
-                        });
-                    if let Some((oi, _)) = opens {
-                        hyps.extend(
-                            squares
-                                .iter()
-                                .enumerate()
-                                .skip(oi + 1)
-                                .map(|(i, &c)| ray_hyp(*d, i, c)),
-                        );
-                    }
-                }
-            }
-        }
+        let hyps = checker_hyps_on(&own, king, view.your_color, captured_at, check_capture_paths);
         if hyps.is_empty() { None } else { Some((king, hyps)) }
     }
 
@@ -602,6 +525,112 @@ impl Deduction {
             }
         })
     }
+}
+
+/// 王手駒がいうるマスの仮説（`Deduction` の doc の H）。自駒のマス `own`・自玉 `king`・王手した相手の手が取ったマス
+/// `captured_at` だけで決まる（反則の観測は使わない）。空なら前提が崩れている
+fn checker_hyps_on(
+    own: &HashSet<Coord>,
+    king: Coord,
+    color: Color,
+    captured_at: Option<Coord>,
+    check_capture_paths: bool,
+) -> Vec<CheckerHyp> {
+    // 8方向の「最初の自駒の手前まで」
+    let rays: Vec<((i8, i8), Vec<Coord>)> = ALL_DIRS
+        .iter()
+        .map(|&d| {
+            let mut squares = vec![];
+            let mut c = step(king, d, 1);
+            while on_board(c) && !own.contains(&c) {
+                squares.push(c);
+                c = step(c, d, 1);
+            }
+            (d, squares)
+        })
+        .collect();
+    // 相手の桂が玉を狙える位置（相手から見て前へ跳んでくる）
+    let forward = if color == Color::Sente { -2 } else { 2 };
+    let knights: Vec<Coord> = [1, -1]
+        .iter()
+        .map(|&df| Coord {
+            file: king.file + df,
+            rank: king.rank + forward,
+        })
+        .filter(|&c| on_board(c) && !own.contains(&c))
+        .collect();
+
+    let ray_hyp = |d: (i8, i8), i: usize, c: Coord| CheckerHyp {
+        square: c,
+        dir: Some(d),
+        dist: i as i8 + 1,
+    };
+    let knight_hyp = |c: Coord| CheckerHyp {
+        square: c,
+        dir: None,
+        dist: 0,
+    };
+
+    let mut hyps = vec![];
+    match captured_at {
+        None => {
+            for (d, squares) in &rays {
+                hyps.extend(squares.iter().enumerate().map(|(i, &c)| ray_hyp(*d, i, c)));
+            }
+            hyps.extend(knights.iter().map(|&c| knight_hyp(c)));
+        }
+        Some(x) => {
+            // 着手駒そのものの王手
+            for (d, squares) in &rays {
+                if let Some(i) = squares.iter().position(|&c| c == x) {
+                    hyps.push(ray_hyp(*d, i, x));
+                }
+            }
+            if knights.contains(&x) {
+                hyps.push(knight_hyp(x));
+            }
+            // 開き王手: 元のマス o の先の筋の上
+            for (d, squares) in &rays {
+                let opens = squares
+                    .iter()
+                    .enumerate()
+                    .take(squares.len().saturating_sub(1))
+                    .find(|&(_, &o)| {
+                        o != x
+                            && reachable(o, x)
+                            && (!check_capture_paths
+                                || !own.iter().any(|&piece| passes_through(o, x, piece)))
+                    });
+                if let Some((oi, _)) = opens {
+                    hyps.extend(
+                        squares
+                            .iter()
+                            .enumerate()
+                            .skip(oi + 1)
+                            .map(|(i, &c)| ray_hyp(*d, i, c)),
+                    );
+                }
+            }
+        }
+    }
+    hyps
+}
+
+/// 王手を受けた時点の、王手駒がいうるマス（重複なし。並びは筋・段の昇順）。エンコーダが過去の王手についても
+/// 同じ規則で候補を出すのに使う（`own` と `king` はその時点の自駒。開き王手の候補は自駒の遮りで絞る = マスク v3 と同じ）
+pub(crate) fn checker_squares_at(
+    own: &HashSet<Coord>,
+    king: Coord,
+    color: Color,
+    captured_at: Option<Coord>,
+) -> Vec<Coord> {
+    let mut out: Vec<Coord> = checker_hyps_on(own, king, color, captured_at, true)
+        .into_iter()
+        .map(|h| h.square)
+        .collect();
+    out.sort_by_key(|c| (c.file, c.rank));
+    out.dedup();
+    out
 }
 
 #[cfg(test)]

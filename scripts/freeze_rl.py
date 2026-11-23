@@ -24,7 +24,9 @@
   （マスクは凍結時点の `action::legal_mask`。rl_v22 以前は旧マスク＝`rl_policy_basic:` と同じ）
 - 共有のまま使うのはルールエンジン（board / shogi）・観測（observation）・自駒の再構成（model）・
   観測からの演繹（deduce。エンコーダ v2 = 確定事実のプレーンつきの重みだけが呼ぶ）。
-  model と deduce は `frozen::SHARED_MODEL_PINS` で pin する（変えるとテンソルが変わるため）
+  model と deduce は `frozen::SHARED_MODEL_PINS` で pin する（変えるとテンソルが変わるため）。
+  エンコーダ v6（2026-11-23〜）は `deduce_king`（締めた相手玉の候補）も呼ぶので、v6 以降の encode.rs を
+  凍結する最初の回に `src/deduce_king.rs` も pin に足す（足していなければこのスクリプトが止める）
 - 実行時 env は読まない（`frozen::HERMETIC_FROM` 以降の規約）
 
 同一性の確認: この スクリプトを再実行して凍結ファイルとの diff が無いこと、CI で
@@ -221,6 +223,11 @@ def main() -> None:
         f"const MAX_FOULS: u32 = {max_fouls};\nconst MAX_PLIES: u32 = {max_plies};",
     )
     policy_net = body("src/rl/policy_net.rs")
+    # エンコーダ v6 の「締めた相手玉の候補」は共有の `src/deduce_king.rs` を呼ぶ。凍結版がこれを共有のまま使うなら、
+    # deduce と同じく pin しておく（変えると v6 のネットのテンソルが変わる）
+    if "crate::deduce_king::" in encode and '"src/deduce_king.rs"' not in (ROOT / "src/frozen/mod.rs").read_text():
+        sys.exit("エンコーダが src/deduce_king.rs を呼んでいる。先に frozen/mod.rs の SHARED_MODEL_PINS に "
+                 "src/deduce_king.rs を足す（src/deduce.rs の項と同じ形）")
     for name, src in (("action", action), ("encode", encode), ("policy_net", policy_net)):
         if "env::var(" in src:
             sys.exit(f"{name} が実行時 env を読んでいる（凍結版は読まない）")

@@ -230,6 +230,22 @@ fn history_consistent(model: &GameModel, view: &PlayerView) -> bool {
     a == b && hand_a == hand_b
 }
 
+/// 受理手（自分の着手・相手の着手）の手数が欠けずに並び、最後が今の手数 `now` と一致するか。手数は適用後の値
+/// （審判・サーバーの規約。初手の受理が 2）なので、受理手は 2, 3, 4, … と並び、最後の受理手の手数が今の手数になる
+/// （まだ誰も指していなければ今の手数は 1）
+fn moves_contiguous(log: &ObservationLog, now: u32) -> bool {
+    let mut last = 1u32;
+    for event in log.events() {
+        if let Observation::MyMove { move_number, .. } | Observation::OpponentMoved { move_number, .. } = event {
+            if *move_number != last + 1 {
+                return false;
+            }
+            last = *move_number;
+        }
+    }
+    last == now
+}
+
 struct Planes<'a> {
     buf: &'a mut [f32],
     color: Color,
@@ -358,11 +374,6 @@ pub fn encode_into_cached(
     let now = view.move_number;
     let fresh = |mn: u32| DECAY.powi(now.saturating_sub(mn) as i32);
     let mut p = Planes { buf: out, color };
-    if v6 {
-        for c in cache.tight_candidates(color, log) {
-            p.set(E_KING_TIGHT, c, 1.0);
-        }
-    }
 
     // 自駒
     for piece in &view.your_pieces {
@@ -677,6 +688,24 @@ pub fn encode_into_cached(
             }
         }
         let own: Vec<Coord> = board.pieces().map(|(c, _)| c).collect();
+        // 締めた相手玉の候補は「相手のどの手で玉が動けたか」を1手ずつ絞るので、相手の手が1つでも欠けたログ
+        // （再起動後の復帰対局・途中の取りこぼし）からは真の玉を落としうる。自駒の配置が追えていても、相手の
+        // 駒を取らない手の欠けは分からないので、受理手の手数が欠けずに今の手数まで並んでいることも確かめる。
+        // どちらかが崩れていたら上界（自駒のいないマス全部）を書く
+        if !history_broken && moves_contiguous(log, now) {
+            for c in cache.tight_candidates(color, log) {
+                p.set(E_KING_TIGHT, c, 1.0);
+            }
+        } else {
+            for file in 1..=9 {
+                for rank in 1..=9 {
+                    let c = Coord { file, rank };
+                    if board.piece_at(c).is_none() {
+                        p.set(E_KING_TIGHT, c, 1.0);
+                    }
+                }
+            }
+        }
         // 逃げた王手駒の候補。値は 鮮度 ÷ 王手の時点の候補数（そのマスにまだいる見込みの目安）。いま自駒がいるマスは除く。
         // 着手履歴が欠けていると王手の時点の自駒が追えないので書かない
         if let (false, Some((cands, n, mn))) = (history_broken, &checker_memo) {
@@ -1179,13 +1208,15 @@ mod tests {
     /// エンコーダ v6 の前半は v5 と同じで、足した7組は審判の真実と矛盾しない:
     /// - 締めた相手玉の候補は真の相手玉を含み、元の候補（`D_KING`）の中に収まる
     /// - 王手からの手数は、審判の盤で数え直した値（王手・駒取り・王手への応手の別）と一致する
-    /// - 逃げた王手駒の候補: 王手を解消した直後（相手が指す前）、取っていない真の王手駒のマスに値がある。合計は 1 以下
+    /// - 逃げた王手駒の候補: 王手を解消した直後（相手が指す前）、取っていない真の王手駒のマスの値は
+    ///   鮮度 ÷ 王手の時点の候補数（候補数は真の盤から数える）。合計は 1 以下
     /// - 自駒の利き: 確実な利きのあるマスは真の盤でも自駒が利いていて、真の盤で自駒が利いているマスは
-    ///   どちらかのプレーンに値がある
+    ///   どちらかのプレーンに値がある。値は自駒だけを置いた盤で数え直した枚数 × 1/3（上限 1）と一致する
     /// - 自玉の筋: 筋の上に自駒はおらず、王手中の真の王手駒（桂以外）は筋の上にいる。ピンされうる自駒のマスには自駒がいる
     /// - 相手の手数の合計は、審判の盤で数え直した値（王手・駒取り・王手かつ駒取り・指した手）と一致する
     /// - 相手に位置が伝わっている自駒は、審判の盤で追った「駒を取ったまま／王手をかけた手で動かしたまま、動いても
-    ///   取られてもいない自駒」のマスと一致し、値は v1 の取ったマス・王手をかけた手の移動先の鮮度と同じ
+    ///   取られてもいない自駒」のマスと一致し、値は印を付けた手の手数（審判の手数）からの鮮度
+    /// - 審判のログは受理手の手数が欠けない（= 締めた相手玉の候補は上界へ戻らない）
     #[test]
     fn v6の足したプレーンは真の盤面と矛盾しない() {
         let mut rng = StdRng::seed_from_u64(16);
@@ -1193,6 +1224,8 @@ mod tests {
         let clock = |n: u32| n.min(CLOCK_CAP) as f32 / CLOCK_CAP as f32;
         let (mut n, mut n_tight, mut n_memo, mut n_checks, mut n_free, mut n_pin, mut n_both) = (0, 0, 0, 0, 0, 0, 0);
         let mut n_exposed = [0u32; 2];
+        // 自駒の利きの枚数（0, 1, 2, 3以上）ごとのマス数（[確実, 遮られうる]）
+        let mut n_attack = [[0u32; 4]; 2];
         let (mut v5, mut v6) = (vec![0.0; NUM_PLANES_V5 * 81], vec![0.0; NUM_PLANES_V6 * 81]);
         for game in 0..24 {
             let mut referee = Referee::new();
@@ -1202,7 +1235,8 @@ mod tests {
             // 相手の手数の合計の数え直し（側ごと。並びは `OC_*`）
             let mut total = [[0u32; 4]; 2];
             // 相手に位置が伝わっている自駒の数え直し（側ごとの [駒を取った, 王手をかけた手で動かした] のマス）
-            let mut marks: [[HashSet<Coord>; 2]; 2] = Default::default();
+            // （マス → 印を付けた手の手数）
+            let mut marks: [[std::collections::HashMap<Coord, u32>; 2]; 2] = Default::default();
             // 途中状態を使い回して書く（毎回たどり直すのと同じ観測になることは上のテストが見ている）
             let mut caches: [[DeducedCache; 2]; 2] = Default::default();
             loop {
@@ -1235,12 +1269,21 @@ mod tests {
                     }
                     // 逃げた王手駒の候補
                     assert!(plane(&v6, E_CHECKER_MEMO).iter().sum::<f32>() <= 1.0 + 1e-4);
-                    // 相手に位置が伝わっている自駒
+                    // 相手に位置が伝わっている自駒（値は印を付けた手の手数から数えた鮮度。エンコーダの P_CAP / P_GAVE_CHECK
+                    // からではなく、審判の手数から直接計算する）
                     let mine = |c: Coord| pos.piece_at(c).is_some_and(|pc| pc.color == s);
-                    for (k, src) in [P_CAP, P_GAVE_CHECK].into_iter().enumerate() {
+                    assert!(moves_contiguous(log, view.move_number), "審判のログは手数が欠けない");
+                    for k in 0..2 {
                         for c in squares() {
-                            let want = if marks[idx(s)][k].contains(&c) { at(src, c) } else { 0.0 };
-                            assert_eq!(at(E_EXPOSED + k, c), want, "game {game} {s:?}: 伝わっている自駒 {k} の {c:?}");
+                            let want = match marks[idx(s)][k].get(&c) {
+                                Some(&mn) => DECAY.powi((view.move_number - mn) as i32),
+                                None => 0.0,
+                            };
+                            assert!(
+                                (at(E_EXPOSED + k, c) - want).abs() < 1e-6,
+                                "game {game} {s:?}: 伝わっている自駒 {k} の {c:?} {} ≠ {want}",
+                                at(E_EXPOSED + k, c)
+                            );
                             assert!(want == 0.0 || mine(c), "印のマスに自駒がいない");
                             n_exposed[k] += (want > 0.0) as u32;
                         }
@@ -1257,6 +1300,32 @@ mod tests {
                         let (sure, maybe) = (at(E_OWN_ATTACK, c) > 0.0, at(E_OWN_ATTACK + 1, c) > 0.0);
                         assert!(!sure || real, "game {game} {s:?}: 確実な利き {c:?} が真の盤に無い");
                         assert!(!real || sure || maybe, "game {game} {s:?}: 真の利き {c:?} がどちらのプレーンにも無い");
+                    }
+                    // 自駒の利きの値: 自駒だけを置いた盤で数え直す。確実な利き = 隣接か桂の跳び（飛び駒の1マス目は
+                    // 隣接）、遮られうる利き = それ以外（飛び駒の2マス目以降）。値は枚数 × 1/3 で 3枚以上は 1
+                    let mut own_only = Position::empty(s);
+                    for (f, pc) in pos.pieces().filter(|(_, pc)| pc.color == s) {
+                        own_only.set(f, Some(pc));
+                    }
+                    for c in squares() {
+                        let mut count = [0u32; 2];
+                        for (f, _) in own_only.pieces() {
+                            if f != c && own_only.attacks(f, c) {
+                                let (df, dr) = ((f.file - c.file).abs(), (f.rank - c.rank).abs());
+                                let sure = (df <= 1 && dr <= 1) || (df == 1 && dr == 2);
+                                count[!sure as usize] += 1;
+                            }
+                        }
+                        for k in 0..2 {
+                            let want = (count[k] as f32 * COUNT_STEP).min(1.0);
+                            assert!(
+                                (at(E_OWN_ATTACK + k, c) - want).abs() < 1e-6,
+                                "game {game} {s:?}: 利き {k} の {c:?} {} ≠ {want}（{} 枚）",
+                                at(E_OWN_ATTACK + k, c),
+                                count[k]
+                            );
+                            n_attack[k][count[k].min(3) as usize] += 1;
+                        }
                     }
                     // 自玉の筋
                     for c in squares() {
@@ -1279,6 +1348,19 @@ mod tests {
                 let view = referee.view(side, [0, 0], game);
                 let in_check = view.you_in_check;
                 let checkers = if in_check { attackers(pos.king_square(side).unwrap(), side.other()) } else { vec![] };
+                // 王手を受けた時点の候補数（真の盤の自駒と自玉・直前に取られたマスから。エンコーダは GameModel から作る）
+                let n_cands = in_check.then(|| {
+                    let own: HashSet<Coord> = pos.pieces().filter(|(_, pc)| pc.color == side).map(|(c, _)| c).collect();
+                    let cap = referee.log(side).events().iter().rev().find_map(|e| match e {
+                        Observation::OpponentMoved { captured_my_piece_at, .. } => {
+                            Some(captured_my_piece_at.as_deref().and_then(parse_usi_square))
+                        }
+                        _ => None,
+                    });
+                    crate::rl::action::checker_squares_at(&own, pos.king_square(side).unwrap(), side, cap.flatten())
+                        .len()
+                });
+                let check_mn = pos.move_number();
                 let mask = legal_mask(&view, referee.log(side), referee.foul_tried(side));
                 let actions: Vec<usize> = (0..NUM_ACTIONS).filter(|&a| mask[a]).collect();
                 if actions.is_empty() {
@@ -1309,11 +1391,12 @@ mod tests {
                         marks[i][k].remove(&f);
                     }
                 }
+                let mn = after.move_number();
                 if captured {
-                    marks[i][0].insert(to);
+                    marks[i][0].insert(to, mn);
                 }
                 if gives_check {
-                    marks[i][1].insert(to);
+                    marks[i][1].insert(to, mn);
                 }
                 total[j][OC_MOVES] += 1;
                 total[j][OC_CAPTURES] += captured as u32;
@@ -1336,10 +1419,16 @@ mod tests {
                 if in_check {
                     let view = referee.view(side, [0, 0], game);
                     let v6 = encode_planes(NUM_PLANES_V6, &view, referee.log(side), referee.foul_tried(side));
+                    // 値 = 王手の手数からの鮮度 ÷ 王手の時点の候補数（取っていない王手駒のマスには自駒が着地も通過もできない）
+                    let want = DECAY.powi((view.move_number - check_mn) as i32) / n_cands.unwrap() as f32;
                     for c in checkers {
                         if after.piece_at(c).is_some_and(|pc| pc.color == other) {
                             let v = v6[E_CHECKER_MEMO * 81 + square_index(normalize(c, side))];
-                            assert!(v > 0.0, "game {game} {side:?}: 逃げた王手駒 {c:?} が候補に無い");
+                            assert!(
+                                (v - want).abs() < 1e-6,
+                                "game {game} {side:?}: 逃げた王手駒 {c:?} の値 {v} ≠ {want}（候補 {:?} 個）",
+                                n_cands
+                            );
                             n_memo += 1;
                         }
                     }
@@ -1355,6 +1444,56 @@ mod tests {
             "v6 の検査が空振りしている"
         );
         assert!(n_exposed.iter().all(|&x| x > 0), "伝わっている自駒の検査が空振りしている");
+        println!("自駒の利きの枚数ごとのマス数（0, 1, 2, 3以上）: 確実 {:?} / 遮られうる {:?}", n_attack[0], n_attack[1]);
+        assert!(n_attack.iter().all(|k| k.iter().all(|&x| x > 0)), "利きの枚数の検査が空振りしている");
+    }
+
+    /// 履歴が欠けたログ（再起動後の復帰対局の空ログ・途中の相手の手の取りこぼし）では、締めた相手玉の候補は
+    /// 真の相手玉を落とさない（上界 = 自駒のいないマス全部へ戻る）。自駒の配置が追えていても相手の駒を取らない手の
+    /// 欠けは分からないので、受理手の手数の並びで見つける
+    #[test]
+    fn 履歴が欠けると締めた相手玉の候補は上界へ戻る() {
+        let mut referee = Referee::new();
+        // 先手 7六歩・後手 3四歩・先手 4八玉・後手 8四歩・先手 3八玉（先手玉は 5九 → 3八 と2手で動いた）
+        for usi in ["7g7f", "3c3d", "5i4h", "8c8d", "4h3h"] {
+            assert!(matches!(referee.step(usi, 0), StepResult::Accepted));
+        }
+        let side = Color::Gote;
+        let view = referee.view(side, [0, 0], 0);
+        let opp_king = referee.position().king_square(Color::Sente).unwrap();
+        let full = referee.log(side);
+        let tight_of = |log: &ObservationLog| -> Vec<f32> {
+            plane(&encode_planes(NUM_PLANES_V6, &view, log, &HashSet::new()), E_KING_TIGHT).to_vec()
+        };
+        let upper: Vec<f32> = (0..81)
+            .map(|i| {
+                let c = normalize(index_square(i), side);
+                view.your_pieces.iter().all(|v| parse_usi_square(&v.square) != Some(c)) as u8 as f32
+            })
+            .collect();
+        let at_king = |t: &[f32]| t[square_index(normalize(opp_king, side))];
+        // 欠けていないログ: 締めた候補を使う（上界より狭い）
+        assert!(moves_contiguous(full, view.move_number));
+        let t = tight_of(full);
+        assert_eq!(at_king(&t), 1.0);
+        assert!(t.iter().sum::<f32>() < upper.iter().sum::<f32>(), "欠けていないログは締めた候補を使う");
+        // 途中の相手の手（先手 4八玉）が欠けたログ / 再起動後の空ログ
+        let mut gap = ObservationLog::default();
+        let mut skipped = false;
+        for e in full.events() {
+            if !skipped && matches!(e, Observation::OpponentMoved { move_number: 4, .. }) {
+                skipped = true;
+                continue;
+            }
+            gap.record(e.clone());
+        }
+        assert!(skipped);
+        for (name, log) in [("途中の欠け", gap), ("空ログ", ObservationLog::default())] {
+            assert!(!moves_contiguous(&log, view.move_number), "{name}");
+            let t = tight_of(&log);
+            assert_eq!(at_king(&t), 1.0, "{name}: 真の相手玉が候補に無い");
+            assert_eq!(t, upper, "{name}: 上界へ戻る");
+        }
     }
 
     /// エンコーダ v3 の前半は v2 と同じ・v4 の前半は v3 と同じで、足した組は審判の真実から数え直した値と一致する:

@@ -33,7 +33,8 @@ use crate::shogi::{HAND_ROLES, ShogiMove, hand_index, parse_usi, promote_role, u
 /// マスクの版。1 = 自駒視点だけ、2 = 観測からの確定反則も除く、
 /// 3 = 開き王手の仮説を自駒の遮りで絞る、4 = 相手に残り得る駒種とその動きも見る。
 /// 5 = 直前に王手で逃げた升への戻りを、王手が残ると確認できる場合に除く。
-pub const MASK_VERSION: u32 = 5;
+/// 6 = 打ち歩詰めを否定できる歩打ちの反則からも占有を推定する。
+pub const MASK_VERSION: u32 = 6;
 
 pub const NUM_SQUARES: usize = 81;
 /// 方向×距離 64 ＋ 桂 2
@@ -287,9 +288,8 @@ struct CheckerHyp {
 ///    （= 合法か）は盤上の占有にしか依らない。行き所の有無は候補生成が自駒視点で落とし済み
 /// 2. **相手の駒がいると確定したマス**（`occupied`）への打ちと、そこを飛び越える移動。確定の根拠は
 ///    - 直前に相手が駒を取ったマス（相手の着手駒がいまそこにいる）
-///    - 王手中でないときの**歩以外の打ちの反則**: 打ちで自玉が危なくなることは無く、二歩・
-///      行き所は候補生成が落とし済みなので、原因は「打ち先に相手の駒がいる」しかない
-///      （歩は打ち歩詰めがありうるので使わない）
+///    - 王手中でないときの**打ちの反則**: 打ちで自玉が危なくなることは無く、二歩・
+///      行き所は候補生成が落とし済み。歩は打ち歩詰めを否定できるときだけ占有を推定する
 ///    - 王手中でないときの**間が1マスの飛び越え反則**（下の 3 で原因が遮りと確定したもの）:
 ///      遮っている駒は間の1マスにしかいられない
 /// 3. **飛び越え反則の先**（`blocked_beyond`）: 王手中でないときに2マス以上の直線移動 F→T が
@@ -391,6 +391,23 @@ fn role_reaches(role: Role, color: Color, from: Coord, to: Coord) -> bool {
         || (distance > 0 && rays(role).iter().any(|&d| step(from, orient(d, color), distance) == to))
 }
 
+/// 打ち先が空だと仮定して、歩が王手できる升に相手玉がいないと証明する。
+/// 飛び駒の途中がある場合は、空と仮定した打ち先だけを通る利きに限る。
+fn pawn_drop_cannot_mate(view: &PlayerView, to: Coord) -> bool {
+    let target = step(to, orient((0, -1), view.your_color), 1);
+    view.your_pieces.iter().any(|piece| {
+        let Some(from) = parse_usi_square(&piece.square) else { return false };
+        let oriented = |d| orient(d, view.your_color);
+        from == target
+            || steps(piece.role).iter().any(|&d| step(from, oriented(d), 1) == target)
+            || rays(piece.role).iter().any(|&d| {
+                let d = oriented(d);
+                let next = step(from, d, 1);
+                next == target || (next == to && step(from, d, 2) == target)
+            })
+    })
+}
+
 impl Deduction {
     /// `candidates` は自駒視点の候補手（`candidate_usis`）。反則から推論するのは候補手の反則だけ
     /// （候補外の反則は原因が成りの選択や行き所でありうるので、占有・遮りの根拠にしない）
@@ -411,12 +428,14 @@ impl Deduction {
 
         // 直前の相手の手（自分の最後の受理手より後にあるもの）が取ったマス
         let mut known_opponent = None;
+        let mut opponent_moved = false;
         for event in log.events().iter().rev() {
             match event {
                 Observation::OpponentMoved {
                     captured_my_piece_at,
                     ..
                 } => {
+                    opponent_moved = true;
                     known_opponent = captured_my_piece_at.as_deref().and_then(parse_usi_square);
                     break;
                 }
@@ -454,7 +473,11 @@ impl Deduction {
             };
             for usi in foul_tried.iter().filter(|u| candidates.contains(*u)) {
                 match parse_usi(usi) {
-                    Some(ShogiMove::Drop { role, to }) if role != Role::Pawn => {
+                    Some(ShogiMove::Drop { role, to })
+                        if role != Role::Pawn
+                            || (mask_version >= 6 && opponent_moved && !view.opponent_in_check
+                                && pawn_drop_cannot_mate(view, to)) =>
+                    {
                         occupied.insert(to);
                     }
                     Some(ShogiMove::Board { from, to, .. }) if king.is_some() => {
@@ -1224,6 +1247,56 @@ mod tests {
         // 歩の打ちの反則は打ち歩詰めがありうるので根拠にしない
         let tried_pawn: HashSet<String> = ["P*5e".to_string()].into();
         assert!(allowed(&view, &log, &tried_pawn, "S*5e"));
+    }
+
+    #[test]
+    fn 打ち歩詰めを否定できる反則から飛車の途中の占有を確定する() {
+        let mut view = view_from_sfen(
+            "ln1g1g1nl/2s4k1/ppp1pp1pp/5bpR1/8P/3PPP3/PPP2KP2/3G2+n2/LN6L",
+            Color::Sente,
+            &[(Role::Rook, 1), (Role::Bishop, 1), (Role::Silver, 1), (Role::Pawn, 1)],
+        );
+        view.you_in_check = false;
+        let mut log = ObservationLog::default();
+        log.record(Observation::OpponentMoved { move_number: 57, captured_my_piece_at: None });
+        let tried = ["B*2b".to_string(), "P*2c".to_string()].into();
+        let action = encode_usi("2d2b", Color::Sente).unwrap();
+
+        // 第7局63試行目。2三が空なら2四飛は2二に利くので、2三歩打は詰みになり得ない。
+        assert!(legal_mask_with_version(&view, &log, &tried, 5)[action]);
+        assert!(!allowed(&view, &log, &tried, "2d2b"));
+        assert!(!allowed(&view, &log, &tried, "S*2c"));
+        assert!(allowed(&view, &log, &tried, "2d2c+"));
+        assert!(allowed(&view, &log, &tried, "2d2e"));
+    }
+
+    #[test]
+    fn 打ち歩詰めの反則で空の打ち先を占有扱いしない() {
+        use crate::selfplay::StartState;
+        use crate::shogi::{Piece, Position};
+
+        let mut pos = Position::empty(Color::Gote);
+        for (square, color, role) in [
+            ("1a", Color::Gote, Role::King),
+            ("8c", Color::Gote, Role::Pawn),
+            ("1c", Color::Sente, Role::Gold),
+            ("2i", Color::Sente, Role::Rook),
+            ("5i", Color::Sente, Role::King),
+        ] {
+            pos.set(parse_usi_square(square).unwrap(), Some(Piece { color, role }));
+        }
+        pos.set_hand(Color::Sente, Role::Pawn, 1);
+        pos.set_hand(Color::Sente, Role::Lance, 1);
+        let mut referee = Referee::from_start(StartState {
+            pos, logs: Default::default(), fouls: [0, 0], plies: 0,
+        });
+        assert!(matches!(referee.step("8c8d", 0), StepResult::Accepted));
+        assert!(matches!(referee.step("P*1b", 0), StepResult::Foul));
+        assert!(referee.position().is_pseudo_legal(&parse_usi("P*1b").unwrap()));
+        let side = Color::Sente;
+        let view = referee.view(side, [0, 0], 0);
+        assert!(referee.position().is_legal(&parse_usi("L*1b").unwrap()));
+        assert!(allowed(&view, referee.log(side), referee.foul_tried(side), "L*1b"));
     }
 
     /// 飛び越え反則（ピンされえない駒）→ 同じ方向でそれより先は遮られる。間が1マスなら

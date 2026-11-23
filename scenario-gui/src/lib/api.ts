@@ -190,7 +190,7 @@ export interface PlaneView {
   index: number | null;
   group: string;
   label: string;
-  /** 足したエンコーダの版（"v1"〜"v5"。参考の1枚は "参考"） */
+  /** 足したエンコーダの版（"v1"〜"v6"） */
   version: string;
   /** 全面に同じ値を入れるプレーンなら、その値 */
   scalar: number | null;
